@@ -104,7 +104,7 @@ Set `TAILSCALE_API_URL=https://api.us.tailscale.com` if you need the US-specific
 
 | Variable | Description | Required | Default |
 |----------|-------------|----------|---------|
-| `TAILSCALE_TAILNET` | Your organization name | No | - |
+| `TAILSCALE_TAILNET` | Your organization name (use `-` for auto-detect) | No | `-` |
 | `TAILSCALE_API_URL` | Tailscale API endpoint URL | No | `https://api.tailscale.com` |
 | **OAuth Method** |
 | `TAILSCALE_OAUTH_CLIENT_ID` | OAuth client ID | Yes* | - |
@@ -114,6 +114,7 @@ Set `TAILSCALE_API_URL=https://api.us.tailscale.com` if you need the US-specific
 | `TAILSCALE_API_KEY` | Your Tailscale API key | Yes* | - |
 | **Other** |
 | `PORT` | Backend server port | No | `8080` |
+| `ENVIRONMENT` | Runtime mode (`development` or `production`) | No | `development` |
 
 *Either OAuth credentials OR API key must be provided
 

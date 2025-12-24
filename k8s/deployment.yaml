@@ -23,18 +23,14 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
-            # Explicitly set production environment
             - name: ENVIRONMENT
               value: "production"
-            # TAILSCALE_TAILNET defaults to "-" (current tailnet) if not set
-            # Only required if using multiple tailnets or need explicit naming
             - name: TAILSCALE_TAILNET
               valueFrom:
                 secretKeyRef:
                   name: tsflow
                   key: TAILSCALE_TAILNET
                   optional: true
-            # Authentication: use either API Key OR OAuth credentials
             - name: TAILSCALE_API_KEY
               valueFrom:
                 secretKeyRef:
