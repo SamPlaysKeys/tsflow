@@ -1,4 +1,5 @@
 # Multi-stage build for TSFlow with embedded frontend
+# Optimized for multi-arch builds (amd64/arm64)
 
 # Frontend build stage
 FROM node:20-alpine AS frontend-build
@@ -9,42 +10,44 @@ COPY frontend/package*.json ./
 RUN npm ci
 
 COPY frontend/ ./
-# Build outputs to ../backend/frontend/dist (relative to frontend/)
 RUN npm run build
 
-# Backend build stage
-FROM golang:1.25-alpine AS backend-build
+# Backend build stage - compile on native arch, cross-compile for target
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS backend-build
+
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /app/backend
 
-RUN apk add --no-cache git
+RUN apk add --no-cache git ca-certificates
 
 COPY backend/go.mod backend/go.sum ./
-RUN go mod download
+
+# Cache Go modules
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 COPY backend/ ./
-# Copy built frontend into backend/frontend/dist for embedding
 COPY --from=frontend-build /app/backend/frontend/dist ./frontend/dist
 
-# Build with embedded frontend
-RUN CGO_ENABLED=0 GOOS=linux go build -o tsflow ./main.go
+# Cross-compile with cache mounts for speed
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -ldflags="-w -s" -trimpath -o tsflow ./main.go
 
-# Runtime stage - single binary, no separate frontend files needed
-FROM alpine:latest
-
-RUN apk --no-cache add ca-certificates
+# Runtime stage - distroless for minimal image
+FROM gcr.io/distroless/static:nonroot
 
 WORKDIR /app
 
-# Only copy the binary - frontend is embedded
-COPY --from=backend-build /app/backend/tsflow ./
+COPY --from=backend-build /app/backend/tsflow .
 
-# Set default environment to production
 ENV ENVIRONMENT=production
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+USER 65532:65532
 
-CMD ["./tsflow"]
+ENTRYPOINT ["/app/tsflow"]
