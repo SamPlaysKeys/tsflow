@@ -283,14 +283,28 @@ const NetworkView: React.FC = () => {
     }
   }, [servicesRecordsData])
 
+  // Validate custom date range - check that start is before end
+  const isCustomDateRangeValid = useMemo(() => {
+    if (!useCustomTimeRange || !startDate || !endDate) return true
+    const start = new Date(startDate)
+    const end = new Date(endDate)
+    return !isNaN(start.getTime()) && !isNaN(end.getTime()) && start < end
+  }, [useCustomTimeRange, startDate, endDate])
+
   // Fetch Tailscale network logs - refresh when time range changes
   const networkLogsApiUrl = useMemo(() => {
     const baseUrl = '/network-logs'
     const params = new URLSearchParams()
-    
+
     if (useCustomTimeRange && startDate && endDate) {
-      params.append('start', new Date(startDate).toISOString())
-      params.append('end', new Date(endDate).toISOString())
+      // Skip fetch if date range is invalid (prevents errors while typing)
+      const start = new Date(startDate)
+      const end = new Date(endDate)
+      if (isNaN(start.getTime()) || isNaN(end.getTime()) || start >= end) {
+        return null // SWR skips fetch when key is null
+      }
+      params.append('start', start.toISOString())
+      params.append('end', end.toISOString())
     } else if (timeRangeFilter !== 'all') {
       // Convert time range to timestamp
       const now = new Date()
@@ -943,7 +957,9 @@ const NetworkView: React.FC = () => {
                       type="datetime-local"
                       value={startDate}
                       onChange={(e) => setStartDate(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                      className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 ${
+                        !isCustomDateRangeValid ? 'border-yellow-400 dark:border-yellow-500' : 'border-gray-300 dark:border-gray-600'
+                      }`}
                     />
                   </div>
                   <div>
@@ -952,9 +968,16 @@ const NetworkView: React.FC = () => {
                       type="datetime-local"
                       value={endDate}
                       onChange={(e) => setEndDate(e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                      className={`w-full px-3 py-2 border rounded-md focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 ${
+                        !isCustomDateRangeValid ? 'border-yellow-400 dark:border-yellow-500' : 'border-gray-300 dark:border-gray-600'
+                      }`}
                     />
                   </div>
+                  {!isCustomDateRangeValid && startDate && endDate && (
+                    <p className="text-xs text-yellow-600 dark:text-yellow-400">
+                      Start date must be before end date
+                    </p>
+                  )}
                 </div>
               ) : (
                 <div className="flex space-x-2">
