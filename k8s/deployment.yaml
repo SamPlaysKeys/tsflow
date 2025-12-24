@@ -20,16 +20,55 @@ spec:
           imagePullPolicy: Always
           ports:
             - name: http
-              containerPort: 8080 
+              containerPort: 8080
               protocol: TCP
           env:
-            - name: TAILSCALE_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: tsflow
-                  key: TAILSCALE_API_KEY
+            # Explicitly set production environment
+            - name: ENVIRONMENT
+              value: "production"
+            # TAILSCALE_TAILNET defaults to "-" (current tailnet) if not set
+            # Only required if using multiple tailnets or need explicit naming
             - name: TAILSCALE_TAILNET
               valueFrom:
                 secretKeyRef:
                   name: tsflow
                   key: TAILSCALE_TAILNET
+                  optional: true
+            # Authentication: use either API Key OR OAuth credentials
+            - name: TAILSCALE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tsflow
+                  key: TAILSCALE_API_KEY
+                  optional: true
+            - name: TAILSCALE_OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: tsflow
+                  key: TAILSCALE_OAUTH_CLIENT_ID
+                  optional: true
+            - name: TAILSCALE_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: tsflow
+                  key: TAILSCALE_OAUTH_CLIENT_SECRET
+                  optional: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
