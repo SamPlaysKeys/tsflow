@@ -7,7 +7,9 @@ node_modules/
 /dist
 /build
 frontend/dist/
+backend/frontend/dist/
 backend/tsflow-backend
+backend/tsflow
 
 # Environment variables
 .env

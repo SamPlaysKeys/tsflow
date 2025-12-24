@@ -2,12 +2,42 @@
 
 A modern, real-time web application for visualizing and analyzing network traffic flows within Tailscale networks.
 
+## Installation
+
+### Homebrew (macOS/Linux)
+
+```bash
+brew install rajsinghtech/tap/tsflow
+```
+
+### Docker
+
+```bash
+docker pull ghcr.io/rajsinghtech/tsflow:latest
+```
+
+### Binary Download
+
+Download the latest release from [GitHub Releases](https://github.com/rajsinghtech/tsflow/releases).
+
 ## Quick Start
+
 > **Important:** TSFlow requires the **Tailscale Network Flow Logs** feature. This is available on **Premium** and **Enterprise** plans and must be enabled in your Tailscale admin console. The application will not show any flow data otherwise.
 
-### Run with Docker
+### Run with Homebrew
 
-The fastest way to get started using pre-built images:
+```bash
+# Set your credentials
+export TAILSCALE_OAUTH_CLIENT_ID=your-client-id
+export TAILSCALE_OAUTH_CLIENT_SECRET=your-client-secret
+
+# Run TSFlow
+tsflow
+```
+
+Navigate to `http://localhost:8080` to access the dashboard.
+
+### Run with Docker
 
 **Using OAuth (Recommended):**
 ```bash
@@ -29,8 +59,6 @@ docker run -d \
   --restart unless-stopped \
   ghcr.io/rajsinghtech/tsflow:latest
 ```
-
-Navigate to `http://localhost:8080` to access the dashboard.
 
 ## Configuration
 

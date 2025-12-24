@@ -1,0 +1,82 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy -C backend
+    - sh -c "cd frontend && npm ci && npm run build"
+
+builds:
+  - id: tsflow
+    dir: backend
+    main: ./main.go
+    binary: tsflow
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - "-s -w"
+      - "-X main.Version={{.Version}}"
+
+archives:
+  - id: tsflow
+    name_template: "{{ .Binary }}-{{ .Tag }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+release:
+  header: |
+    ## Installation
+
+    ### Homebrew
+    ```bash
+    brew install rajsinghtech/tap/tsflow
+    ```
+
+    ### Docker
+    ```bash
+    docker pull ghcr.io/rajsinghtech/tsflow:{{ .Tag }}
+    ```
+
+    Run with Docker:
+    ```bash
+    docker run -d \
+      --name tsflow \
+      -p 8080:8080 \
+      -e TAILSCALE_OAUTH_CLIENT_ID=your-client-id \
+      -e TAILSCALE_OAUTH_CLIENT_SECRET=your-client-secret \
+      ghcr.io/rajsinghtech/tsflow:{{ .Tag }}
+    ```
+
+    ### Binary Download
+    Download the appropriate binary for your platform from the assets below.
+
+    ## What's New
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+brews:
+  - name: tsflow
+    ids:
+      - tsflow
+    repository:
+      owner: rajsinghtech
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    commit_author:
+      name: Raj Singh
+      email: rajsinghcpre@gmail.com
+    homepage: "https://github.com/rajsinghtech/tsflow"
+    description: "Tailscale network flow visualizer - monitor traffic between nodes in your tailnet"
+    license: "MIT"

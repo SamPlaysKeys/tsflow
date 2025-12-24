@@ -8,10 +8,10 @@ import type {
 // Note: Validation imports removed as they're not critical for functionality
 // import { validateDeviceResponse, validateNetworkLogsResponse } from './validation'
 
-// Backend configuration
-const BACKEND_BASE_URL = import.meta.env.DEV 
-  ? 'http://localhost:8080' // Development backend
-  : '' // Production: same origin (backend serves frontend)
+// Backend configuration - uses relative URLs in both dev and prod
+// Dev: Vite proxy forwards /api/* to backend at localhost:8080
+// Prod: Same origin (frontend embedded in backend binary)
+const BACKEND_BASE_URL = ''
 
 class TailscaleAPI {
   private baseUrl: string
@@ -47,9 +47,7 @@ class TailscaleAPI {
       if (error instanceof TypeError) {
         if (error.message.includes('Failed to fetch')) {
           throw {
-            message: import.meta.env.DEV 
-              ? 'Cannot connect to backend server. Make sure the Go backend is running on port 8080.'
-              : 'Backend service unavailable. Please try again later.',
+            message: 'Cannot connect to backend server. Make sure the Go backend is running on port 8080.',
             status: 0,
           } as ApiError
         }

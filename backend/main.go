@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -9,8 +10,10 @@ import (
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/rajsinghtech/tsflow/backend/frontend"
 	"github.com/rajsinghtech/tsflow/backend/internal/config"
 	"github.com/rajsinghtech/tsflow/backend/internal/handlers"
+	"github.com/rajsinghtech/tsflow/backend/internal/middleware"
 	"github.com/rajsinghtech/tsflow/backend/internal/services"
 )
 
@@ -78,6 +81,9 @@ func main() {
 	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization"}
 	router.Use(cors.New(corsConfig))
 
+	// Add CSP middleware for security
+	router.Use(middleware.CSPMiddleware())
+
 	router.GET("/health", handlerService.HealthCheck)
 
 	api := router.Group("/api")
@@ -90,22 +96,17 @@ func main() {
 		api.GET("/dns/nameservers", handlerService.GetDNSNameservers)
 	}
 
-	var distPath string
-	if cfg.Environment == "production" {
-		distPath = "./dist"
+	// Register embedded frontend (must be after API routes)
+	if err := frontend.RegisterFrontend(router); err != nil {
+		if errors.Is(err, frontend.ErrFrontendNotIncluded) {
+			log.Println("Frontend not embedded in build, skipping frontend registration")
+			log.Println("Run `npm run build` in frontend/ then rebuild Go binary to embed frontend")
+		} else {
+			log.Fatalf("Failed to register frontend: %v", err)
+		}
 	} else {
-		distPath = "../frontend/dist"
+		log.Println("Embedded frontend registered successfully")
 	}
-
-	log.Printf("Serving static files from: %s", distPath)
-
-	router.Static("/assets", distPath+"/assets")
-	router.StaticFile("/favicon.svg", distPath+"/favicon.svg")
-	router.StaticFile("/", distPath+"/index.html")
-	router.NoRoute(func(c *gin.Context) {
-		log.Printf("Serving SPA route for: %s", c.Request.URL.Path)
-		c.File(distPath + "/index.html")
-	})
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -117,7 +118,6 @@ func main() {
 	log.Printf("Tailnet: %s", cfg.TailscaleTailnet)
 	log.Printf("API URL: %s", cfg.TailscaleAPIURL)
 	log.Printf("Environment: %s", cfg.Environment)
-	log.Printf("Static files: %s", distPath)
 	
 	// Log authentication method being used
 	if cfg.TailscaleOAuthClientID != "" && cfg.TailscaleOAuthClientSecret != "" {
