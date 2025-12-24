@@ -62,17 +62,17 @@ jobs:
     
     - name: Run backend tests
       working-directory: ./backend
-      run: go test ./...
-    
+      run: go test -tags exclude_frontend ./...
+
     - name: Run backend linting
       working-directory: ./backend
       run: |
         go fmt ./...
-        go vet ./...
-    
-    - name: Build backend
+        go vet -tags exclude_frontend ./...
+
+    - name: Build backend (without frontend for CI)
       working-directory: ./backend
-      run: go build -o tsflow-backend ./main.go
+      run: go build -tags exclude_frontend -o tsflow-backend ./main.go
 
   build-and-push:
     runs-on: ubuntu-latest
