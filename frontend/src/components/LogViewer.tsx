@@ -180,11 +180,21 @@ const formatRelativeTime = (timestamp: string): string => {
   const diffSec = Math.floor(diffMs / 1000)
   const diffMin = Math.floor(diffSec / 60)
   const diffHr = Math.floor(diffMin / 60)
-  
+
   if (diffSec < 60) return `${diffSec}s ago`
   if (diffMin < 60) return `${diffMin}m ago`
   if (diffHr < 24) return `${diffHr}h ago`
-  return then.toLocaleDateString()
+  // Show full UTC timestamp for logs older than 24 hours
+  const month = then.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' })
+  const day = then.getUTCDate()
+  const hours = then.getUTCHours().toString().padStart(2, '0')
+  const minutes = then.getUTCMinutes().toString().padStart(2, '0')
+  return `${month} ${day} ${hours}:${minutes} UTC`
+}
+
+const formatUTCTimestamp = (timestamp: string): string => {
+  const date = new Date(timestamp)
+  return date.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC')
 }
 
 const LogViewer: React.FC<LogViewerProps> = ({
@@ -424,7 +434,7 @@ const LogViewer: React.FC<LogViewerProps> = ({
           onSelectLog?.(log)
         }}
       >
-        <div className="w-24 text-gray-500 dark:text-gray-400" title={new Date(log.timestamp).toLocaleString()}>
+        <div className="w-28 text-gray-500 dark:text-gray-400" title={formatUTCTimestamp(log.timestamp)}>
           {formatRelativeTime(log.timestamp)}
         </div>
         <div className="flex-1 truncate">
@@ -551,7 +561,7 @@ const LogViewer: React.FC<LogViewerProps> = ({
         <div className="flex flex-col h-full">
           {/* Column headers */}
           <div className="flex items-center px-4 py-2 bg-gray-50 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 text-xs font-medium text-gray-700 dark:text-gray-300">
-            <div className="w-24">Time</div>
+            <div className="w-28">Time (UTC)</div>
             <div className="flex-1">Source</div>
             <div className="w-8"></div>
             <div className="flex-1">Destination</div>
