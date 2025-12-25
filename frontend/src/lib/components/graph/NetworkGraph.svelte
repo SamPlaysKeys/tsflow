@@ -1,0 +1,271 @@
+<script lang="ts">
+	import { writable, get } from 'svelte/store';
+	import {
+		SvelteFlow,
+		SvelteFlowProvider,
+		Background,
+		Controls,
+		MiniMap,
+		useSvelteFlow,
+		type Node,
+		type Edge,
+		type ColorMode
+	} from '@xyflow/svelte';
+	import '@xyflow/svelte/dist/style.css';
+	import { uiStore, themeStore } from '$lib/stores';
+	import { applyElkLayout } from '$lib/utils/elk-layout';
+	import type { NetworkNode as NetworkNodeType, NetworkLink } from '$lib/types';
+	import NetworkNode from './NetworkNode.svelte';
+
+	interface Props {
+		nodes: NetworkNodeType[];
+		edges: NetworkLink[];
+	}
+
+	let { nodes, edges }: Props = $props();
+
+	// Register custom node types (cast to any for Svelte 5 compatibility)
+	const nodeTypes = {
+		network: NetworkNode as any
+	};
+
+	// Get edge style based on traffic type
+	function getEdgeStyle(edge: NetworkLink): string {
+		let strokeColor = 'var(--color-muted-foreground)';
+
+		switch (edge.trafficType) {
+			case 'virtual':
+				strokeColor = 'var(--color-traffic-virtual)';
+				break;
+			case 'subnet':
+				strokeColor = 'var(--color-traffic-subnet)';
+				break;
+			case 'physical':
+				strokeColor = 'var(--color-traffic-physical)';
+				break;
+		}
+
+		// Width based on traffic volume
+		let strokeWidth = 1;
+		if (edge.totalBytes > 10000000) strokeWidth = 4;
+		else if (edge.totalBytes > 1000000) strokeWidth = 3;
+		else if (edge.totalBytes > 100000) strokeWidth = 2;
+
+		return `stroke: ${strokeColor}; stroke-width: ${strokeWidth}px;`;
+	}
+
+	// Map our theme to xyflow colorMode
+	const colorMode = $derived.by((): ColorMode => {
+		const mode = $themeStore;
+		if (mode === 'system') return 'system';
+		if (mode === 'light') return 'light';
+		return 'dark';
+	});
+
+	// Create writable stores for SvelteFlow
+	const flowNodesStore = writable<Node[]>([]);
+	const flowEdgesStore = writable<Edge[]>([]);
+
+	// Track if we've already laid out these nodes
+	let lastNodeIds = '';
+	let isLayouting = $state(false);
+
+	// Store references to flow functions (set by child component)
+	let fitBoundsRef: ((bounds: { x: number; y: number; width: number; height: number }, options?: { duration?: number; padding?: number }) => void) | null = null;
+	let fitViewRef: ((options?: { duration?: number; padding?: number }) => void) | null = null;
+
+	// Focus zoom on selected node and its connections
+	function focusOnSelection(nodeIds: string[]) {
+		if (nodeIds.length === 0 || !fitBoundsRef) return;
+
+		const currentNodes = get(flowNodesStore);
+		const nodesToFit = currentNodes.filter((node) => nodeIds.includes(node.id));
+		if (nodesToFit.length === 0) return;
+
+		// Calculate bounding box
+		const padding = 100;
+		let minX = Infinity,
+			minY = Infinity,
+			maxX = -Infinity,
+			maxY = -Infinity;
+
+		nodesToFit.forEach((node) => {
+			const nodeWidth = (node.width as number) || 280;
+			const nodeHeight = (node.height as number) || 140;
+
+			minX = Math.min(minX, node.position.x);
+			minY = Math.min(minY, node.position.y);
+			maxX = Math.max(maxX, node.position.x + nodeWidth);
+			maxY = Math.max(maxY, node.position.y + nodeHeight);
+		});
+
+		const width = maxX - minX + padding * 2;
+		const height = maxY - minY + padding * 2;
+
+		fitBoundsRef(
+			{
+				x: minX - padding,
+				y: minY - padding,
+				width,
+				height
+			},
+			{ duration: 600, padding: 0.1 }
+		);
+	}
+
+	// Update stores and apply layout when props change
+	$effect(() => {
+		const currentNodeIds = nodes.map((n) => n.id).sort().join(',');
+
+		// Only re-layout if nodes changed
+		if (currentNodeIds !== lastNodeIds && nodes.length > 0) {
+			lastNodeIds = currentNodeIds;
+			layoutNodes();
+		}
+	});
+
+	async function layoutNodes() {
+		if (isLayouting) return;
+		isLayouting = true;
+
+		try {
+			// Convert to Svelte Flow format
+			const flowNodes: Node[] = nodes.map((node) => ({
+				id: node.id,
+				type: 'network',
+				position: { x: 0, y: 0 },
+				data: {
+					label: node.displayName,
+					...node
+				}
+			}));
+
+			const flowEdges: Edge[] = edges.map((edge) => ({
+				id: edge.id,
+				source: edge.source,
+				target: edge.target,
+				type: 'default',
+				style: getEdgeStyle(edge)
+			}));
+
+			// Apply ELK layout
+			const { nodes: layoutedNodes, edges: layoutedEdges } = await applyElkLayout(
+				flowNodes,
+				flowEdges,
+				{ algorithm: 'layered', nodeSpacing: 150 }
+			);
+
+			flowNodesStore.set(layoutedNodes);
+			flowEdgesStore.set(layoutedEdges);
+		} catch (error) {
+			console.error('Layout failed:', error);
+			// Fallback: just set nodes with grid positions
+			const cols = Math.ceil(Math.sqrt(nodes.length));
+			const flowNodes: Node[] = nodes.map((node, index) => ({
+				id: node.id,
+				type: 'network',
+				position: {
+					x: (index % cols) * 300 + 50,
+					y: Math.floor(index / cols) * 180 + 50
+				},
+				data: {
+					label: node.displayName,
+					...node
+				}
+			}));
+
+			const flowEdges: Edge[] = edges.map((edge) => ({
+				id: edge.id,
+				source: edge.source,
+				target: edge.target,
+				type: 'default',
+				style: getEdgeStyle(edge)
+			}));
+
+			flowNodesStore.set(flowNodes);
+			flowEdgesStore.set(flowEdges);
+		} finally {
+			isLayouting = false;
+		}
+	}
+
+	function handleNodeClick(event: CustomEvent) {
+		const nodeId = event.detail.node?.id;
+		if (nodeId) {
+			uiStore.selectNode(nodeId);
+
+			// Get connected nodes and focus on them
+			const currentEdges = get(flowEdgesStore);
+			const connectedNodeIds = new Set<string>([nodeId]);
+
+			currentEdges.forEach((edge) => {
+				if (edge.source === nodeId || edge.target === nodeId) {
+					connectedNodeIds.add(edge.source);
+					connectedNodeIds.add(edge.target);
+				}
+			});
+
+			// Focus on selection after a brief delay for state update
+			setTimeout(() => focusOnSelection(Array.from(connectedNodeIds)), 50);
+		}
+	}
+
+	function handleEdgeClick(event: CustomEvent) {
+		const edge = event.detail.edge;
+		if (edge) {
+			uiStore.selectEdge(edge.id);
+
+			// Focus on the two connected nodes
+			setTimeout(() => focusOnSelection([edge.source, edge.target]), 50);
+		}
+	}
+
+	function handlePaneClick() {
+		uiStore.clearSelection();
+		// Reset view to show all nodes
+		if (fitViewRef) fitViewRef({ duration: 400, padding: 0.1 });
+	}
+
+	// Capture flow instance when mounted
+	function captureFlowInstance() {
+		const { fitBounds, fitView } = useSvelteFlow();
+		fitBoundsRef = fitBounds;
+		fitViewRef = fitView;
+	}
+</script>
+
+<div class="h-full w-full">
+	{#if isLayouting}
+		<div class="flex h-full items-center justify-center">
+			<div class="text-muted-foreground">Calculating layout...</div>
+		</div>
+	{:else}
+		<SvelteFlowProvider>
+			<SvelteFlow
+				nodes={flowNodesStore}
+				edges={flowEdgesStore}
+				{nodeTypes}
+				{colorMode}
+				fitView
+				proOptions={{ hideAttribution: true }}
+				on:nodeclick={handleNodeClick}
+				on:edgeclick={handleEdgeClick}
+				on:paneclick={handlePaneClick}
+				oninit={captureFlowInstance}
+			>
+				<Background />
+				<Controls />
+				<MiniMap
+					nodeColor={(node) => {
+						const data = node.data as any;
+						const style = getComputedStyle(document.documentElement);
+						if (data?.tags?.includes('derp')) return style.getPropertyValue('--color-node-derp').trim() || '#8b5cf6';
+						if (data?.isTailscale) return style.getPropertyValue('--color-node-tailscale').trim() || '#3b82f6';
+						if (data?.tags?.includes('private')) return style.getPropertyValue('--color-node-private').trim() || '#10b981';
+						return style.getPropertyValue('--color-node-public').trim() || '#f59e0b';
+					}}
+				/>
+			</SvelteFlow>
+		</SvelteFlowProvider>
+	{/if}
+</div>

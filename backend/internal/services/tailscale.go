@@ -39,29 +39,16 @@ type Device struct {
 	Created                string   `json:"created"`
 	MachineKey             string   `json:"machineKey"`
 	NodeKey                string   `json:"nodeKey"`
-	ClientVersion          string   `json:"clientVersion"`
-	UpdateAvailable        bool     `json:"updateAvailable"`
-	Blocksincomingnonnodes bool     `json:"blocksIncomingnonnodes"`
-	EnabledRoutes          []string `json:"enabledRoutes"`
+	ClientVersion             string   `json:"clientVersion"`
+	UpdateAvailable           bool     `json:"updateAvailable"`
+	BlocksIncomingConnections bool     `json:"blocksIncomingConnections"`
+	EnabledRoutes             []string `json:"enabledRoutes"`
 	AdvertisedRoutes       []string `json:"advertisedRoutes"`
 	Tags                   []string `json:"tags"`
 }
 
 type DevicesResponse struct {
 	Devices []Device `json:"devices"`
-}
-
-type NetworkLogEntry struct {
-	ID        string `json:"id"`
-	Timestamp string `json:"timestamp"`
-	Source    string `json:"source"`
-	Target    string `json:"target"`
-	Protocol  string `json:"protocol"`
-	Action    string `json:"action"`
-}
-
-type NetworkLogsResponse struct {
-	Logs []NetworkLogEntry `json:"logs"`
 }
 
 func NewTailscaleService(cfg *config.Config) *TailscaleService {
@@ -213,7 +200,7 @@ func (ts *TailscaleService) GetDevices() (*DevicesResponse, error) {
 				NodeKey:                device.NodeKey,
 				ClientVersion:          device.ClientVersion,
 				UpdateAvailable:        device.UpdateAvailable,
-				Blocksincomingnonnodes: device.BlocksIncomingConnections,
+				BlocksIncomingConnections: device.BlocksIncomingConnections,
 				EnabledRoutes:          device.EnabledRoutes,
 				AdvertisedRoutes:       device.AdvertisedRoutes,
 				Tags:                   device.Tags,
@@ -253,8 +240,7 @@ func (ts *TailscaleService) GetNetworkLogs(start, end string) (interface{}, erro
 	if err != nil {
 		return nil, fmt.Errorf("invalid end time: %w", err)
 	}
-	
-	
+
 	// For smaller ranges, use the original approach
 	if ts.tsClient != nil {
 		// Use much longer timeout for larger time ranges
@@ -278,8 +264,7 @@ func (ts *TailscaleService) GetNetworkLogs(start, end string) (interface{}, erro
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch network logs from tailscale client: %w", err)
 		}
-		
-		
+
 		return map[string]interface{}{
 			"logs": logs,
 		}, nil
@@ -554,26 +539,7 @@ func (ts *TailscaleService) GetNetworkMap() (map[string]interface{}, error) {
 
 // GetDeviceFlows retrieves flow data for a specific device
 func (ts *TailscaleService) GetDeviceFlows(deviceID string) (map[string]interface{}, error) {
-	// Note: This is a placeholder as Tailscale doesn't have a public device flows API
-	// In a real implementation, you might need to implement this differently
-	// or collect this data through other means
-
-	// For now, return mock data
-	flows := map[string]interface{}{
-		"device_id": deviceID,
-		"flows": []map[string]interface{}{
-			{
-				"source":      "unknown",
-				"destination": "unknown",
-				"protocol":    "tcp",
-				"bytes":       0,
-				"packets":     0,
-			},
-		},
-		"total_flows": 0,
-	}
-
-	return flows, nil
+	return nil, fmt.Errorf("device flows API not implemented: Tailscale does not expose per-device flow data")
 }
 
 // GetDNSNameservers retrieves DNS config for the tailnet
@@ -634,8 +600,7 @@ type StaticRecordInfo struct {
 }
 
 // GetVIPServices fetches all VIP services (virtual IP services) for the tailnet
-func (ts *TailscaleService) GetVIPServices() (map[string]VIPServiceInfo, error) {
-	ctx := context.Background()
+func (ts *TailscaleService) GetVIPServices(ctx context.Context) (map[string]VIPServiceInfo, error) {
 	endpoint := fmt.Sprintf("/tailnet/%s/services", url.PathEscape(ts.tailnet))
 	
 	body, err := ts.makeRequest(ctx, endpoint)
@@ -663,8 +628,7 @@ func (ts *TailscaleService) GetVIPServices() (map[string]VIPServiceInfo, error) 
 }
 
 // GetStaticRecords fetches all static DNS records for the tailnet
-func (ts *TailscaleService) GetStaticRecords() (map[string]StaticRecordInfo, error) {
-	ctx := context.Background()
+func (ts *TailscaleService) GetStaticRecords(ctx context.Context) (map[string]StaticRecordInfo, error) {
 	endpoint := fmt.Sprintf("/tailnet/%s/static-records", url.PathEscape(ts.tailnet))
 	
 	body, err := ts.makeRequest(ctx, endpoint)
@@ -683,13 +647,4 @@ func (ts *TailscaleService) GetStaticRecords() (map[string]StaticRecordInfo, err
 	}
 	
 	return response.Records, nil
-}
-
-// Helper function to get map keys for debugging
-func getMapKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }

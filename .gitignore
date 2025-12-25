@@ -62,6 +62,15 @@ Thumbs.db
 # TypeScript
 *.tsbuildinfo
 
+# SvelteKit
+frontend/.svelte-kit/
+
+# Database
+data/
+*.db
+*.db-shm
+*.db-wal
+
 # Optional npm cache directory
 .npm
 

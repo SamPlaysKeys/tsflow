@@ -1,22 +1,50 @@
 package handlers
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/rajsinghtech/tsflow/backend/internal/database"
 	"github.com/rajsinghtech/tsflow/backend/internal/services"
 	tailscale "tailscale.com/client/tailscale/v2"
 )
 
+const (
+	// ChunkThreshold is the duration above which log queries are chunked
+	ChunkThreshold = 7 * 24 * time.Hour
+	// ChunkSize is the size of each chunk for large log queries
+	ChunkSize = 24 * time.Hour
+	// MaxParallelChunks limits concurrent chunk fetches
+	MaxParallelChunks = 2
+	// MaxLogsInMemory limits logs held in memory during chunked queries
+	MaxLogsInMemory = 10000
+	// MaxLogsInResponse limits logs returned in a single response
+	MaxLogsInResponse = 50000
+	// DefaultFlowLogLimit is the default limit for stored flow log queries
+	DefaultFlowLogLimit = 10000
+	// MaxFlowLogLimit is the maximum limit for stored flow log queries
+	MaxFlowLogLimit = 100000
+	// DefaultQueryTimeout is the default timeout for database queries
+	DefaultQueryTimeout = 30 * time.Second
+	// ShortQueryTimeout is the timeout for quick database queries
+	ShortQueryTimeout = 10 * time.Second
+)
+
 type Handlers struct {
 	tailscaleService *services.TailscaleService
+	store            database.Store
+	poller           *services.Poller
 }
 
-func NewHandlers(tailscaleService *services.TailscaleService) *Handlers {
+func NewHandlers(tailscaleService *services.TailscaleService, store database.Store, poller *services.Poller) *Handlers {
 	return &Handlers{
 		tailscaleService: tailscaleService,
+		store:            store,
+		poller:           poller,
 	}
 }
 
@@ -44,25 +72,27 @@ func (h *Handlers) GetDevices(c *gin.Context) {
 }
 
 func (h *Handlers) GetServicesAndRecords(c *gin.Context) {
+	ctx := c.Request.Context()
+
 	// Fetch VIP services
-	vipServices, servicesErr := h.tailscaleService.GetVIPServices()
+	vipServices, servicesErr := h.tailscaleService.GetVIPServices(ctx)
 	if servicesErr != nil {
 		log.Printf("WARNING GetVIPServices failed: %v", servicesErr)
 		vipServices = make(map[string]services.VIPServiceInfo)
 	}
-	
+
 	// Fetch static records
-	staticRecords, recordsErr := h.tailscaleService.GetStaticRecords()
+	staticRecords, recordsErr := h.tailscaleService.GetStaticRecords(ctx)
 	if recordsErr != nil {
 		log.Printf("WARNING GetStaticRecords failed: %v", recordsErr)
 		staticRecords = make(map[string]services.StaticRecordInfo)
 	}
-	
+
 	response := gin.H{
 		"services": vipServices,
 		"records":  staticRecords,
 	}
-	
+
 	log.Printf("SUCCESS GetServicesAndRecords: returned %d services and %d records", len(vipServices), len(staticRecords))
 	c.JSON(http.StatusOK, response)
 }
@@ -108,12 +138,9 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 	}
 
 	duration := et.Sub(st)
-	// Use chunking for queries longer than 7 days to prevent response size issues
-	if duration > 7*24*time.Hour {
-		// Use smaller chunks and fewer parallel requests for 30+ day queries
-		chunkSize := 24 * time.Hour // 1-day chunks to prevent timeouts
-		maxParallel := 2            // Reduce parallel requests to prevent memory issues
-		chunks, err := h.tailscaleService.GetNetworkLogsChunkedParallel(start, end, chunkSize, maxParallel)
+	// Use chunking for queries longer than threshold to prevent response size issues
+	if duration > ChunkThreshold {
+		chunks, err := h.tailscaleService.GetNetworkLogsChunkedParallel(start, end, ChunkSize, MaxParallelChunks)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":   "Failed to fetch network logs",
@@ -124,13 +151,11 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 		}
 
 		var allLogs []interface{}
-		maxLogs := 10000 // Limit total logs to prevent memory issues
-		
+
 		for _, chunk := range chunks {
 			if logsArray, ok := chunk.([]interface{}); ok {
-				if len(allLogs)+len(logsArray) > maxLogs {
-					// Truncate if we're approaching the limit
-					remaining := maxLogs - len(allLogs)
+				if len(allLogs)+len(logsArray) > MaxLogsInMemory {
+					remaining := MaxLogsInMemory - len(allLogs)
 					if remaining > 0 {
 						allLogs = append(allLogs, logsArray[:remaining]...)
 					}
@@ -140,9 +165,8 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 			} else if logsMap, ok := chunk.(map[string]interface{}); ok {
 				if logs, exists := logsMap["logs"]; exists {
 					if logsArray, ok := logs.([]interface{}); ok {
-						if len(allLogs)+len(logsArray) > maxLogs {
-							// Truncate if we're approaching the limit
-							remaining := maxLogs - len(allLogs)
+						if len(allLogs)+len(logsArray) > MaxLogsInMemory {
+							remaining := MaxLogsInMemory - len(allLogs)
 							if remaining > 0 {
 								allLogs = append(allLogs, logsArray[:remaining]...)
 							}
@@ -150,7 +174,6 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 						}
 						allLogs = append(allLogs, logsArray...)
 					} else if logsArray, ok := logs.([]tailscale.NetworkFlowLog); ok {
-						// Convert []NetworkFlowLog to []interface{}
 						for _, log := range logsArray {
 							allLogs = append(allLogs, log)
 						}
@@ -158,32 +181,34 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 				}
 			}
 		}
-		
-		// If we have too many logs, sample them to prevent response size issues
+
+		// Sample logs if too many to prevent response size issues
 		finalLogs := allLogs
-		if len(allLogs) > 50000 {
-			// Sample every Nth log to get approximately 50,000 logs
-			sampleRate := len(allLogs) / 50000
+		if len(allLogs) > MaxLogsInResponse {
+			sampleRate := len(allLogs) / MaxLogsInResponse
 			if sampleRate < 1 {
 				sampleRate = 1
 			}
-			
-			sampledLogs := make([]interface{}, 0, 50000)
+			sampledLogs := make([]interface{}, 0, MaxLogsInResponse)
 			for i := 0; i < len(allLogs); i += sampleRate {
 				sampledLogs = append(sampledLogs, allLogs[i])
 			}
 			finalLogs = sampledLogs
 		}
-		
+
+		sampleRate := 1
+		if len(finalLogs) > 0 {
+			sampleRate = len(allLogs) / len(finalLogs)
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"logs": finalLogs,
 			"metadata": gin.H{
-				"chunked":     true,
-				"chunks":      len(chunks),
-				"duration":    duration.String(),
-				"totalLogs":   len(allLogs),
-				"sampled":     len(finalLogs) < len(allLogs),
-				"sampleRate":  len(allLogs) / len(finalLogs),
+				"chunked":    true,
+				"chunks":     len(chunks),
+				"duration":   duration.String(),
+				"totalLogs":  len(allLogs),
+				"sampled":    len(finalLogs) < len(allLogs),
+				"sampleRate": sampleRate,
 			},
 		})
 		return
@@ -201,13 +226,208 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, logs)
 }
 
-// Helper function to get map keys
-func getMapKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+// GetStoredFlowLogs retrieves flow logs from the local SQLite database
+func (h *Handlers) GetStoredFlowLogs(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Database not configured",
+		})
+		return
 	}
-	return keys
+
+	start := c.Query("start")
+	end := c.Query("end")
+	limitStr := c.DefaultQuery("limit", strconv.Itoa(DefaultFlowLogLimit))
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		limit = DefaultFlowLogLimit
+	}
+	if limit > MaxFlowLogLimit {
+		limit = MaxFlowLogLimit
+	}
+
+	var startTime, endTime time.Time
+
+	if start == "" {
+		startTime = time.Now().Add(-1 * time.Hour)
+	} else {
+		startTime, err = time.Parse(time.RFC3339, start)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start time"})
+			return
+		}
+	}
+
+	if end == "" {
+		endTime = time.Now()
+	} else {
+		endTime, err = time.Parse(time.RFC3339, end)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end time"})
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
+	defer cancel()
+
+	logs, err := h.store.GetFlowLogs(ctx, startTime, endTime, limit)
+	if err != nil {
+		log.Printf("ERROR GetStoredFlowLogs: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to fetch stored logs",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"logs": logs,
+		"metadata": gin.H{
+			"count":  len(logs),
+			"start":  startTime,
+			"end":    endTime,
+			"limit":  limit,
+			"source": "database",
+		},
+	})
+}
+
+// GetDataRange returns the available time range of stored data
+func (h *Handlers) GetDataRange(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Database not configured",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), ShortQueryTimeout)
+	defer cancel()
+
+	dataRange, err := h.store.GetDataRange(ctx)
+	if err != nil {
+		log.Printf("ERROR GetDataRange: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to get data range",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, dataRange)
+}
+
+// GetPollerStatus returns the current status of the background poller
+func (h *Handlers) GetPollerStatus(c *gin.Context) {
+	if h.poller == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Poller not configured",
+		})
+		return
+	}
+
+	stats := h.poller.Stats()
+
+	// Add database stats if available
+	if h.store != nil {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), ShortQueryTimeout)
+		defer cancel()
+
+		dbStats, err := h.store.GetStats(ctx)
+		if err == nil {
+			stats["database"] = dbStats
+		}
+	}
+
+	c.JSON(http.StatusOK, stats)
+}
+
+// TriggerPoll manually triggers a poll (for testing/debugging)
+func (h *Handlers) TriggerPoll(c *gin.Context) {
+	if h.poller == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Poller not configured",
+		})
+		return
+	}
+
+	// The poller will poll on next tick, but we can return current stats
+	stats := h.poller.Stats()
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Poll will occur on next interval",
+		"stats":   stats,
+	})
+}
+
+// GetBandwidthAggregated returns aggregated bandwidth data for the chart
+func (h *Handlers) GetBandwidthAggregated(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Database not configured",
+		})
+		return
+	}
+
+	start := c.Query("start")
+	end := c.Query("end")
+	bucketStr := c.Query("bucket")
+
+	// If no bucket specified, pass 0 to let the database layer auto-calculate optimal size
+	var bucketSeconds int
+	var err error
+	if bucketStr != "" {
+		bucketSeconds, err = strconv.Atoi(bucketStr)
+		if err != nil || bucketSeconds < 0 {
+			bucketSeconds = 0
+		}
+	}
+
+	var startTime, endTime time.Time
+
+	if start == "" {
+		startTime = time.Now().Add(-1 * time.Hour)
+	} else {
+		startTime, err = time.Parse(time.RFC3339, start)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start time"})
+			return
+		}
+	}
+
+	if end == "" {
+		endTime = time.Now()
+	} else {
+		endTime, err = time.Parse(time.RFC3339, end)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end time"})
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
+	defer cancel()
+
+	buckets, err := h.store.GetBandwidthAggregated(ctx, startTime, endTime, bucketSeconds)
+	if err != nil {
+		log.Printf("ERROR GetBandwidthAggregated: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to fetch bandwidth data",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"buckets": buckets,
+		"metadata": gin.H{
+			"count":         len(buckets),
+			"start":         startTime,
+			"end":           endTime,
+			"bucketSeconds": bucketSeconds,
+		},
+	})
 }
 
 func (h *Handlers) GetNetworkMap(c *gin.Context) {
@@ -226,25 +446,10 @@ func (h *Handlers) GetNetworkMap(c *gin.Context) {
 }
 
 func (h *Handlers) GetDeviceFlows(c *gin.Context) {
-	deviceID := c.Param("deviceId")
-	if deviceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Device ID is required",
-		})
-		return
-	}
-
-	flows, err := h.tailscaleService.GetDeviceFlows(deviceID)
-	if err != nil {
-		log.Printf("ERROR GetDeviceFlows failed for device %s: %v", deviceID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to fetch device flows",
-			"message": err.Error(),
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, flows)
+	c.JSON(http.StatusNotImplemented, gin.H{
+		"error":   "Not implemented",
+		"message": "Tailscale does not expose per-device flow data",
+	})
 }
 
 func (h *Handlers) GetDNSNameservers(c *gin.Context) {

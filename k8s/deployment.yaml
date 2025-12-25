@@ -5,7 +5,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate
+    type: Recreate  # Required for SQLite (single writer)
   selector:
     matchLabels:
       app: tsflow
@@ -25,6 +25,8 @@ spec:
           env:
             - name: ENVIRONMENT
               value: "production"
+            - name: PORT
+              value: "8080"
             - name: TAILSCALE_TAILNET
               valueFrom:
                 secretKeyRef:
@@ -49,22 +51,52 @@ spec:
                   name: tsflow
                   key: TAILSCALE_OAUTH_CLIENT_SECRET
                   optional: true
+            - name: TAILSCALE_OAUTH_SCOPES
+              valueFrom:
+                secretKeyRef:
+                  name: tsflow
+                  key: TAILSCALE_OAUTH_SCOPES
+                  optional: true
+            - name: TAILSCALE_API_URL
+              valueFrom:
+                secretKeyRef:
+                  name: tsflow
+                  key: TAILSCALE_API_URL
+                  optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
           livenessProbe:
             httpGet:
-              path: /health
+              path: /api/health
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 30
           readinessProbe:
             httpGet:
-              path: /health
+              path: /api/health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
           resources:
             requests:
-              memory: "64Mi"
-              cpu: "50m"
+              memory: "128Mi"
+              cpu: "100m"
             limits:
-              memory: "256Mi"
-              cpu: "500m"
+              memory: "512Mi"
+              cpu: "1000m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: tsflow-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tsflow-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

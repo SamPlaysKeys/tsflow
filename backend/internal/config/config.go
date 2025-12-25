@@ -20,14 +20,15 @@ type Config struct {
 }
 
 // Load loads configuration from environment variables
+// Supports both TAILSCALE_* and VITE_TAILSCALE_* prefixes for backwards compatibility
 func Load() *Config {
 	return &Config{
-		TailscaleAPIKey:            os.Getenv("TAILSCALE_API_KEY"),
+		TailscaleAPIKey:            getEnvWithFallback("TAILSCALE_API_KEY"),
 		TailscaleTailnet:           getEnvWithDefault("TAILSCALE_TAILNET", "-"),
 		TailscaleAPIURL:            getEnvWithDefault("TAILSCALE_API_URL", "https://api.tailscale.com"),
-		TailscaleOAuthClientID:     os.Getenv("TAILSCALE_OAUTH_CLIENT_ID"),
-		TailscaleOAuthClientSecret: os.Getenv("TAILSCALE_OAUTH_CLIENT_SECRET"),
-		TailscaleOAuthScopes:       parseScopes(os.Getenv("TAILSCALE_OAUTH_SCOPES")),
+		TailscaleOAuthClientID:     getEnvWithFallback("TAILSCALE_OAUTH_CLIENT_ID"),
+		TailscaleOAuthClientSecret: getEnvWithFallback("TAILSCALE_OAUTH_CLIENT_SECRET"),
+		TailscaleOAuthScopes:       parseScopes(getEnvWithFallback("TAILSCALE_OAUTH_SCOPES")),
 		Port:                       getEnvWithDefault("PORT", "8080"),
 		Environment:                getEnvWithDefault("ENVIRONMENT", "development"),
 	}
@@ -51,10 +52,23 @@ func (c *Config) Validate() error {
 
 // getEnvWithDefault returns the environment variable value or a default value
 func getEnvWithDefault(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
+	if value := getEnvWithFallback(key); value != "" {
 		return value
 	}
 	return defaultValue
+}
+
+// getEnvWithFallback checks both non-prefixed and VITE_ prefixed env vars for backwards compatibility
+func getEnvWithFallback(key string) string {
+	// First check without prefix
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	// Fall back to VITE_ prefixed version
+	if value := os.Getenv("VITE_" + key); value != "" {
+		return value
+	}
+	return ""
 }
 
 // parseScopes parses a comma-separated string of OAuth scopes

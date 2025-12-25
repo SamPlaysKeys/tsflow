@@ -1,6 +1,6 @@
 # TSFlow - Tailscale Network Flow Visualizer
 
-A modern, real-time web application for visualizing and analyzing network traffic flows within Tailscale networks.
+A real-time network traffic visualization dashboard for Tailscale networks. Monitor device connectivity, analyze bandwidth usage, and explore network flows with an interactive graph interface.
 
 ## Installation
 
@@ -18,164 +18,146 @@ docker pull ghcr.io/rajsinghtech/tsflow:latest
 
 ### Binary Download
 
-Download the latest release from [GitHub Releases](https://github.com/rajsinghtech/tsflow/releases).
+Download from [GitHub Releases](https://github.com/rajsinghtech/tsflow/releases).
 
 ## Quick Start
 
-> **Important:** TSFlow requires the **Tailscale Network Flow Logs** feature. This is available on **Premium** and **Enterprise** plans and must be enabled in your Tailscale admin console. The application will not show any flow data otherwise.
+> **Note:** TSFlow requires **Tailscale Network Flow Logs** (Premium/Enterprise plans). Enable it in your [Tailscale admin console](https://login.tailscale.com/admin/logs).
 
 ### Run with Homebrew
 
 ```bash
-# Set your credentials
 export TAILSCALE_OAUTH_CLIENT_ID=your-client-id
 export TAILSCALE_OAUTH_CLIENT_SECRET=your-client-secret
-
-# Run TSFlow
 tsflow
 ```
 
-Navigate to `http://localhost:8080` to access the dashboard.
+Open `http://localhost:8080`
 
 ### Run with Docker
 
-**Using OAuth (Recommended):**
 ```bash
 docker run -d \
   --name tsflow \
   -p 8080:8080 \
+  -v tsflow_data:/app/data \
   -e TAILSCALE_OAUTH_CLIENT_ID=your-client-id \
   -e TAILSCALE_OAUTH_CLIENT_SECRET=your-client-secret \
-  --restart unless-stopped \
-  ghcr.io/rajsinghtech/tsflow:latest
-```
-
-**Using API Key:**
-```bash
-docker run -d \
-  --name tsflow \
-  -p 8080:8080 \
-  -e TAILSCALE_API_KEY=your-api-key \
-  --restart unless-stopped \
   ghcr.io/rajsinghtech/tsflow:latest
 ```
 
 ## Configuration
 
-### Tailscale Network Logs
+### Authentication
 
-Go to the [Logs tab](https://login.tailscale.com/admin/logs) in your Tailscale Admin Console and ensure that Network Flow Logs are **enabled**. **Note**: This requires a **Premium** or **Enterprise** plan.
+TSFlow supports OAuth (recommended) or API key authentication.
 
-### Authentication Methods
+**OAuth Setup:**
+1. Go to [OAuth clients](https://login.tailscale.com/admin/settings/oauth) in Tailscale Admin
+2. Create a new OAuth client with `all:read` scope
+3. Set `TAILSCALE_OAUTH_CLIENT_ID` and `TAILSCALE_OAUTH_CLIENT_SECRET`
 
-TSFlow supports two authentication methods with Tailscale. You only need to configure one method.
-
-#### Method 1: OAuth Client Credentials (Recommended)
-
-OAuth provides better security through automatic token refresh and fine-grained permissions.
-
-1. Go to the [OAuth clients page](https://login.tailscale.com/admin/settings/oauth) in your Tailscale Admin Console
-2. Create a new OAuth client
-3. Copy the Client ID and Client Secret
-4. Set the following environment variables:
-   - `TAILSCALE_OAUTH_CLIENT_ID=your-client-id`
-   - `TAILSCALE_OAUTH_CLIENT_SECRET=your-client-secret`
-
-#### Method 2: API Key (Legacy)
-
-1. Go to the [API keys page](https://login.tailscale.com/admin/settings/keys) in your Tailscale Admin Console
+**API Key Setup:**
+1. Go to [API keys](https://login.tailscale.com/admin/settings/keys) in Tailscale Admin
 2. Create a new API key
-3. Copy the generated API key (starts with `tskey-api-`)
-4. Set `TAILSCALE_API_KEY=your-api-key`
-
-#### Organization Name
-1. Go to the [Settings page](https://login.tailscale.com/admin/settings/general) in your Tailscale Admin Console
-2. Your organization name is displayed in the Organization section (used by the Tailscale API)
-3. Use this exact organization name for the `TAILSCALE_TAILNET` variable
-
-#### API URL (Optional)
-For most users, the default API URL works fine. However, some users may need to use region-specific endpoints:
-- Default: `https://api.tailscale.com`
-- US-specific: `https://api.us.tailscale.com`
-
-Set `TAILSCALE_API_URL=https://api.us.tailscale.com` if you need the US-specific endpoint.
+3. Set `TAILSCALE_API_KEY`
 
 ### Environment Variables
 
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `TAILSCALE_TAILNET` | Your organization name (use `-` for auto-detect) | No | `-` |
-| `TAILSCALE_API_URL` | Tailscale API endpoint URL | No | `https://api.tailscale.com` |
-| **OAuth Method** |
-| `TAILSCALE_OAUTH_CLIENT_ID` | OAuth client ID | Yes* | - |
-| `TAILSCALE_OAUTH_CLIENT_SECRET` | OAuth client secret | Yes* | - |
-| `TAILSCALE_OAUTH_SCOPES` | OAuth scopes (comma-separated) | No | `all:read` |
-| **API Key Method** |
-| `TAILSCALE_API_KEY` | Your Tailscale API key | Yes* | - |
-| **Other** |
-| `PORT` | Backend server port | No | `8080` |
-| `ENVIRONMENT` | Runtime mode (`development` or `production`) | No | `development` |
+#### Tailscale Authentication
 
-*Either OAuth credentials OR API key must be provided
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TAILSCALE_OAUTH_CLIENT_ID` | OAuth client ID | - |
+| `TAILSCALE_OAUTH_CLIENT_SECRET` | OAuth client secret | - |
+| `TAILSCALE_OAUTH_SCOPES` | OAuth scopes (comma-separated) | `all:read` |
+| `TAILSCALE_API_KEY` | API key (alternative to OAuth) | - |
+| `TAILSCALE_TAILNET` | Tailnet name (`-` for auto-detect) | `-` |
+| `TAILSCALE_API_URL` | API endpoint | `https://api.tailscale.com` |
 
-## Deployment Options
+#### Server Settings
 
-### Using Docker Compose
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | Server port | `8080` |
+| `ENVIRONMENT` | `development` or `production` | `development` |
 
-Create a `docker-compose.yml` file:
+#### Data Storage
 
-**Using OAuth (Recommended):**
-```yaml
-services:
-  tsflow:
-    image: ghcr.io/rajsinghtech/tsflow:latest
-    container_name: tsflow
-    ports:
-      - "8080:8080"
-    environment:
-      - TAILSCALE_OAUTH_CLIENT_ID=your-client-id
-      - TAILSCALE_OAUTH_CLIENT_SECRET=your-client-secret
-    restart: unless-stopped
-```
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TSFLOW_DB_PATH` | SQLite database path | `./data/tsflow.db` |
+| `TSFLOW_POLL_INTERVAL` | How often to poll Tailscale API | `5m` |
+| `TSFLOW_RETENTION` | How long to keep flow logs | `168h` (7 days) |
 
-**Using API Key:**
-```yaml
-services:
-  tsflow:
-    image: ghcr.io/rajsinghtech/tsflow:latest
-    container_name: tsflow
-    ports:
-      - "8080:8080"
-    environment:
-      - TAILSCALE_API_KEY=your-api-key
-    restart: unless-stopped
-```
+### Data Storage
 
-**Commands:**
-```bash
-# Start the application
-docker-compose up -d
+TSFlow stores flow logs in SQLite with:
+- **7-day retention** for raw flow logs (configurable via `TSFLOW_RETENTION`)
 
-# View logs
-docker-compose logs -f tsflow
+Mount a volume to persist data: `-v tsflow_data:/app/data`
 
-# Update to latest version
-docker-compose pull && docker-compose up -d
+## Development
 
-# Stop the application
-docker-compose down
-```
-
-### Kubernetes Deployment
-
-Deploy TSFlow on Kubernetes using the provided manifests:
-
-#### Quick Deploy with Kustomize
+### Setup
 
 ```bash
 git clone https://github.com/rajsinghtech/tsflow.git
-cd tsflow/k8s
+cd tsflow
 
+# Install dependencies
+cd frontend && npm install && cd ..
+cd backend && go mod download && cd ..
+```
+
+### Development Mode
+
+Run backend and frontend separately for hot reload:
+
+```bash
+# Terminal 1: Backend (no embedded frontend)
+make dev-backend
+
+# Terminal 2: Frontend with Vite dev server
+make dev-frontend
+```
+
+Frontend runs on `http://localhost:5173` and proxies `/api` to backend on `:8080`.
+
+### Production Build
+
+```bash
+make build
+./backend/tsflow
+```
+
+This builds the SvelteKit frontend and embeds it in the Go binary.
+
+## Deployment
+
+### Docker Compose
+
+```yaml
+services:
+  tsflow:
+    image: ghcr.io/rajsinghtech/tsflow:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - TAILSCALE_OAUTH_CLIENT_ID=${TAILSCALE_OAUTH_CLIENT_ID}
+      - TAILSCALE_OAUTH_CLIENT_SECRET=${TAILSCALE_OAUTH_CLIENT_SECRET}
+    volumes:
+      - tsflow_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  tsflow_data:
+```
+
+### Kubernetes
+
+```bash
+cd k8s
 # Edit kustomization.yaml with your credentials
 kubectl apply -k .
 ```
@@ -183,6 +165,10 @@ kubectl apply -k .
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=rajsinghtech/tsflow&type=Date)](https://star-history.com/#rajsinghtech/tsflow&Date)
+
+## License
+
+MIT
 
 ---
 

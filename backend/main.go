@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-contrib/gzip"
@@ -12,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/rajsinghtech/tsflow/backend/frontend"
 	"github.com/rajsinghtech/tsflow/backend/internal/config"
+	"github.com/rajsinghtech/tsflow/backend/internal/database"
 	"github.com/rajsinghtech/tsflow/backend/internal/handlers"
 	"github.com/rajsinghtech/tsflow/backend/internal/middleware"
 	"github.com/rajsinghtech/tsflow/backend/internal/services"
@@ -49,8 +55,56 @@ func main() {
 		log.Fatalf("Configuration error: %v", err)
 	}
 
+	// Initialize SQLite database
+	dbPath := os.Getenv("TSFLOW_DB_PATH")
+	if dbPath == "" {
+		// Default to data directory
+		dbPath = filepath.Join(".", "data", "tsflow.db")
+	}
+
+	// Ensure data directory exists
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		log.Fatalf("Failed to create data directory: %v", err)
+	}
+
+	store, err := database.NewSQLiteStore(dbPath)
+	if err != nil {
+		log.Fatalf("Failed to create database store: %v", err)
+	}
+
+	// Initialize database schema
+	ctx := context.Background()
+	if err := store.Init(ctx); err != nil {
+		log.Fatalf("Failed to initialize database: %v", err)
+	}
+
+	// Create services
 	tailscaleService := services.NewTailscaleService(cfg)
-	handlerService := handlers.NewHandlers(tailscaleService)
+
+	// Create and start background poller
+	pollerConfig := services.DefaultPollerConfig()
+
+	// Allow configuration via environment variables
+	if interval := os.Getenv("TSFLOW_POLL_INTERVAL"); interval != "" {
+		if d, err := time.ParseDuration(interval); err == nil {
+			pollerConfig.PollInterval = d
+		}
+	}
+	if retention := os.Getenv("TSFLOW_RETENTION"); retention != "" {
+		if d, err := time.ParseDuration(retention); err == nil {
+			pollerConfig.RetentionPeriod = d
+		}
+	}
+
+	poller := services.NewPoller(tailscaleService, store, pollerConfig)
+
+	// Start poller in background
+	if err := poller.Start(ctx); err != nil {
+		log.Printf("Warning: Failed to start poller: %v", err)
+	}
+
+	// Create handlers with store and poller
+	handlerService := handlers.NewHandlers(tailscaleService, store, poller)
 
 	// Configure Gin logging
 	var router *gin.Engine
@@ -70,12 +124,7 @@ func main() {
 	router.Use(gzip.Gzip(gzip.DefaultCompression))
 
 	corsConfig := cors.DefaultConfig()
-	if cfg.Environment == "production" {
-		corsConfig.AllowOrigins = []string{"https://tsflow.production.com"}
-		corsConfig.AllowAllOrigins = false
-	} else {
-		corsConfig.AllowOrigins = []string{"http://localhost:3000", "http://localhost:5173"}
-	}
+	corsConfig.AllowAllOrigins = true
 	corsConfig.AllowCredentials = true
 	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
 	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization"}
@@ -88,12 +137,20 @@ func main() {
 
 	api := router.Group("/api")
 	{
+		// Existing endpoints (live API queries)
 		api.GET("/devices", handlerService.GetDevices)
 		api.GET("/services-records", handlerService.GetServicesAndRecords)
 		api.GET("/network-logs", handlerService.GetNetworkLogs)
 		api.GET("/network-map", handlerService.GetNetworkMap)
 		api.GET("/devices/:deviceId/flows", handlerService.GetDeviceFlows)
 		api.GET("/dns/nameservers", handlerService.GetDNSNameservers)
+
+		// New endpoints for stored historical data
+		api.GET("/flow-logs", handlerService.GetStoredFlowLogs)
+		api.GET("/flow-logs/range", handlerService.GetDataRange)
+		api.GET("/bandwidth", handlerService.GetBandwidthAggregated)
+		api.GET("/poller/status", handlerService.GetPollerStatus)
+		api.POST("/poller/trigger", handlerService.TriggerPoll)
 	}
 
 	// Register embedded frontend (must be after API routes)
@@ -118,18 +175,40 @@ func main() {
 	log.Printf("Tailnet: %s", cfg.TailscaleTailnet)
 	log.Printf("API URL: %s", cfg.TailscaleAPIURL)
 	log.Printf("Environment: %s", cfg.Environment)
-	
+	log.Printf("Database: %s", dbPath)
+	log.Printf("Poll Interval: %s", pollerConfig.PollInterval)
+	log.Printf("Retention Period: %s", pollerConfig.RetentionPeriod)
+
 	// Log authentication method being used
 	if cfg.TailscaleOAuthClientID != "" && cfg.TailscaleOAuthClientSecret != "" {
 		log.Printf("Authentication: OAuth Client Credentials (Client ID: %s)", cfg.TailscaleOAuthClientID)
 	} else {
 		log.Printf("Authentication: API Key")
 	}
-	
+
 	log.Printf("Server ready at http://0.0.0.0:%s", port)
 	log.Printf("=== Server Started Successfully ===")
 
-	if err := router.Run("0.0.0.0:" + port); err != nil {
-		log.Fatalf("FATAL Failed to start server: %v", err)
+	// Graceful shutdown handling
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		if err := router.Run("0.0.0.0:" + port); err != nil {
+			log.Fatalf("FATAL Failed to start server: %v", err)
+		}
+	}()
+
+	<-quit
+	log.Println("Shutting down server...")
+
+	// Stop the poller gracefully
+	poller.Stop()
+
+	// Close database connection
+	if err := store.Close(); err != nil {
+		log.Printf("Error closing database: %v", err)
 	}
+
+	log.Println("Server stopped")
 }

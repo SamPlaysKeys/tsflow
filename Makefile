@@ -1,4 +1,4 @@
-.PHONY: dev dev-backend dev-frontend build clean docker help
+.PHONY: dev dev-backend dev-frontend build clean docker install check help
 
 # Default target
 help:
@@ -8,9 +8,15 @@ help:
 	@echo "  make dev-backend  - Run backend only (no embedded frontend)"
 	@echo "  make dev-frontend - Run frontend dev server with hot reload"
 	@echo "  make build        - Build production binary with embedded frontend"
+	@echo "  make check        - Run linting and type checks"
 	@echo "  make docker       - Build Docker image"
 	@echo "  make clean        - Remove build artifacts"
 	@echo ""
+
+# Install dependencies
+install:
+	cd frontend && npm install
+	cd backend && go mod download
 
 # Development: run backend without embedded frontend
 dev-backend:
@@ -28,13 +34,20 @@ dev:
 	@echo "Starting frontend dev server..."
 	@cd frontend && npm run dev
 
+# Linting and type checking
+check:
+	@echo "Checking frontend..."
+	cd frontend && npm run check
+	@echo "Checking backend..."
+	cd backend && go vet -tags exclude_frontend ./...
+
 # Production: build single binary with embedded frontend
 build:
-	@echo "Building frontend..."
+	@echo "Building frontend (outputs to backend/frontend/dist)..."
 	cd frontend && npm run build
 	@echo "Building backend with embedded frontend..."
-	cd backend && go build -o tsflow .
-	@echo "Done! Binary at backend/tsflow ($(shell ls -lh backend/tsflow | awk '{print $$5}'))"
+	cd backend && go build -ldflags="-w -s" -o tsflow .
+	@echo "Done! Binary at backend/tsflow"
 
 # Docker build
 docker:
@@ -42,6 +55,6 @@ docker:
 
 # Clean build artifacts
 clean:
-	rm -rf backend/tsflow backend/tsflow-backend
+	rm -f backend/tsflow
 	rm -rf backend/frontend/dist
-	rm -rf frontend/dist
+	rm -rf frontend/.svelte-kit

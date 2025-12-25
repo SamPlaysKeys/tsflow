@@ -1,28 +1,24 @@
 services:
   tsflow:
     build: .
+    image: ghcr.io/rajsinghtech/tsflow:latest
+    container_name: tsflow
     ports:
-      - "8080:8080"  # Backend serves both API and frontend
+      - "8080:8080"
     environment:
-      - TAILSCALE_API_KEY=${TAILSCALE_API_KEY}
-      - TAILSCALE_TAILNET=${TAILSCALE_TAILNET}
-      - TAILSCALE_API_URL=${TAILSCALE_API_URL}
       - TAILSCALE_OAUTH_CLIENT_ID=${TAILSCALE_OAUTH_CLIENT_ID}
       - TAILSCALE_OAUTH_CLIENT_SECRET=${TAILSCALE_OAUTH_CLIENT_SECRET}
       - TAILSCALE_OAUTH_SCOPES=${TAILSCALE_OAUTH_SCOPES}
+      - TAILSCALE_API_KEY=${TAILSCALE_API_KEY}
+      - TAILSCALE_TAILNET=${TAILSCALE_TAILNET}
+      - TAILSCALE_API_URL=${TAILSCALE_API_URL}
       - PORT=8080
       - ENVIRONMENT=production
     env_file:
       - .env
-    restart: unless-stopped
     volumes:
       - tsflow_data:/app/data
-    networks:
-      - tsflow
+    restart: unless-stopped
 
 volumes:
   tsflow_data:
-
-networks:
-  tsflow:
-    driver: bridge

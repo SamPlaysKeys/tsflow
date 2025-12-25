@@ -1,5 +1,5 @@
-# Multi-stage build for TSFlow with embedded frontend
-# Optimized for multi-arch builds (amd64/arm64)
+# Multi-stage build for TSFlow
+# Produces a single binary with embedded SvelteKit frontend
 
 # Frontend build stage
 FROM node:20-alpine AS frontend-build
@@ -10,10 +10,12 @@ COPY frontend/package*.json ./
 RUN npm ci
 
 COPY frontend/ ./
-RUN npm run build
 
-# Backend build stage - compile on native arch, cross-compile for target
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS backend-build
+# SvelteKit builds to ../backend/frontend/dist via adapter config
+RUN mkdir -p ../backend/frontend && npm run build
+
+# Backend build stage
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS backend-build
 
 ARG TARGETOS
 ARG TARGETARCH
@@ -23,28 +25,29 @@ WORKDIR /app/backend
 RUN apk add --no-cache git ca-certificates
 
 COPY backend/go.mod backend/go.sum ./
-
-# Cache Go modules
-RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY backend/ ./
 COPY --from=frontend-build /app/backend/frontend/dist ./frontend/dist
 
-# Cross-compile with cache mounts for speed
+# Cross-compile with optimizations
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -ldflags="-w -s" -trimpath -o tsflow ./main.go
+    go build -ldflags="-w -s" -trimpath -o tsflow .
 
-# Runtime stage - distroless for minimal image
+# Runtime stage - minimal distroless image
 FROM gcr.io/distroless/static:nonroot
 
 WORKDIR /app
 
 COPY --from=backend-build /app/backend/tsflow .
 
+# Create data directory for SQLite
+VOLUME /app/data
+
 ENV ENVIRONMENT=production
+ENV PORT=8080
 
 EXPOSE 8080
 

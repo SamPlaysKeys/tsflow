@@ -1,0 +1,144 @@
+@import 'tailwindcss';
+
+@theme {
+	--color-background: #0a0a0a;
+	--color-foreground: #fafafa;
+	--color-card: #141414;
+	--color-card-foreground: #fafafa;
+	--color-popover: #141414;
+	--color-popover-foreground: #fafafa;
+	--color-primary: #3b82f6;
+	--color-primary-foreground: #fafafa;
+	--color-secondary: #27272a;
+	--color-secondary-foreground: #fafafa;
+	--color-muted: #27272a;
+	--color-muted-foreground: #a1a1aa;
+	--color-accent: #27272a;
+	--color-accent-foreground: #fafafa;
+	--color-destructive: #ef4444;
+	--color-destructive-foreground: #fafafa;
+	--color-border: #27272a;
+	--color-input: #27272a;
+	--color-ring: #3b82f6;
+	--radius: 0.5rem;
+
+	/* Node colors */
+	--color-node-tailscale: #3b82f6;
+	--color-node-private: #10b981;
+	--color-node-public: #f59e0b;
+	--color-node-derp: #8b5cf6;
+	--color-node-selected: #ec4899;
+
+	/* Traffic type colors */
+	--color-traffic-virtual: #3b82f6;
+	--color-traffic-subnet: #10b981;
+	--color-traffic-physical: #f59e0b;
+}
+
+:root.light {
+	--color-background: #ffffff;
+	--color-foreground: #0a0a0a;
+	--color-card: #ffffff;
+	--color-card-foreground: #0a0a0a;
+	--color-popover: #ffffff;
+	--color-popover-foreground: #0a0a0a;
+	--color-primary: #2563eb;
+	--color-primary-foreground: #ffffff;
+	--color-secondary: #f4f4f5;
+	--color-secondary-foreground: #18181b;
+	--color-muted: #f4f4f5;
+	--color-muted-foreground: #71717a;
+	--color-accent: #f4f4f5;
+	--color-accent-foreground: #18181b;
+	--color-border: #e4e4e7;
+	--color-input: #e4e4e7;
+	--color-ring: #2563eb;
+
+	/* Slightly darker node colors for light mode contrast */
+	--color-node-tailscale: #2563eb;
+	--color-node-private: #059669;
+	--color-node-public: #d97706;
+	--color-node-derp: #7c3aed;
+	--color-node-selected: #db2777;
+
+	/* Traffic type colors - slightly darker for light mode */
+	--color-traffic-virtual: #2563eb;
+	--color-traffic-subnet: #059669;
+	--color-traffic-physical: #d97706;
+}
+
+html {
+	font-family:
+		ui-sans-serif,
+		system-ui,
+		sans-serif,
+		'Apple Color Emoji',
+		'Segoe UI Emoji';
+}
+
+body {
+	background-color: var(--color-background);
+	color: var(--color-foreground);
+}
+
+/* Svelte Flow overrides - these work with xyflow's colorMode prop */
+.svelte-flow {
+	--xy-background-color: var(--color-background);
+	--xy-node-background-color: var(--color-card);
+	--xy-node-border-color: var(--color-border);
+	--xy-minimap-background-color: var(--color-card);
+	--xy-minimap-mask-background-color: color-mix(in srgb, var(--color-background) 60%, transparent);
+	--xy-controls-button-background-color: var(--color-card);
+	--xy-controls-button-background-color-hover: var(--color-secondary);
+	--xy-controls-button-color: var(--color-foreground);
+	--xy-controls-button-border-color: var(--color-border);
+	--xy-background-pattern-dots-color: var(--color-muted-foreground);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+
+::-webkit-scrollbar-track {
+	background: var(--color-background);
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--color-muted-foreground);
+	border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: var(--color-foreground);
+}
+
+/* Light mode scrollbar */
+:root.light ::-webkit-scrollbar-thumb {
+	background: var(--color-border);
+}
+
+:root.light ::-webkit-scrollbar-thumb:hover {
+	background: var(--color-muted-foreground);
+}
+
+/* Input focus states */
+input:focus,
+select:focus,
+textarea:focus {
+	outline: 2px solid var(--color-ring);
+	outline-offset: 2px;
+}
+
+/* Button disabled state */
+button:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+/* Selection colors */
+::selection {
+	background-color: var(--color-primary);
+	color: var(--color-primary-foreground);
+}
