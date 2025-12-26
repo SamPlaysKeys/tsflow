@@ -295,6 +295,66 @@ func (h *Handlers) GetStoredFlowLogs(c *gin.Context) {
 	})
 }
 
+// GetAggregatedFlowLogs returns aggregated node-to-node traffic without arbitrary limits
+// This is the scalable endpoint for large networks - groups flows by src/dst IP pairs
+func (h *Handlers) GetAggregatedFlowLogs(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Database not configured",
+		})
+		return
+	}
+
+	start := c.Query("start")
+	end := c.Query("end")
+
+	var startTime, endTime time.Time
+	var err error
+
+	if start == "" {
+		startTime = time.Now().Add(-1 * time.Hour)
+	} else {
+		startTime, err = time.Parse(time.RFC3339, start)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start time"})
+			return
+		}
+	}
+
+	if end == "" {
+		endTime = time.Now()
+	} else {
+		endTime, err = time.Parse(time.RFC3339, end)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end time"})
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
+	defer cancel()
+
+	flows, err := h.store.GetAggregatedFlows(ctx, startTime, endTime)
+	if err != nil {
+		log.Printf("ERROR GetAggregatedFlowLogs: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to fetch aggregated flows",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"flows": flows,
+		"metadata": gin.H{
+			"count":  len(flows),
+			"start":  startTime,
+			"end":    endTime,
+			"source": "database",
+		},
+	})
+}
+
 // GetDataRange returns the available time range of stored data
 func (h *Handlers) GetDataRange(c *gin.Context) {
 	if h.store == nil {

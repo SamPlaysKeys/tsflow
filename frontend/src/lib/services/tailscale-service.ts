@@ -46,6 +46,33 @@ export interface StoredFlowLogsResponse {
 	};
 }
 
+export interface AggregatedFlow {
+	nodeId: string;
+	trafficType: string;
+	protocol: number;
+	srcIp: string;
+	srcPort: number;
+	dstIp: string;
+	dstPort: number;
+	totalTxBytes: number;
+	totalRxBytes: number;
+	totalTxPkts: number;
+	totalRxPkts: number;
+	flowCount: number;
+	firstSeen: string;
+	lastSeen: string;
+}
+
+export interface AggregatedFlowsResponse {
+	flows: AggregatedFlow[];
+	metadata: {
+		count: number;
+		start: string;
+		end: string;
+		source: string;
+	};
+}
+
 export interface PollerStatus {
 	running: boolean;
 	lastPollTime: string;
@@ -99,6 +126,15 @@ export const tailscaleService = {
 		const endISO = end.toISOString();
 		return api.get<StoredFlowLogsResponse>(
 			`/flow-logs?start=${startISO}&end=${endISO}&limit=${limit}`
+		);
+	},
+
+	// Aggregated flows for scalable network graph rendering (no limits)
+	async getAggregatedFlows(start: Date, end: Date): Promise<AggregatedFlowsResponse> {
+		const startISO = start.toISOString();
+		const endISO = end.toISOString();
+		return api.get<AggregatedFlowsResponse>(
+			`/flow-logs/aggregated?start=${startISO}&end=${endISO}`
 		);
 	},
 

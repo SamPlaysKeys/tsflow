@@ -197,6 +197,25 @@
 	function capitalizeFirst(str: string): string {
 		return str.charAt(0).toUpperCase() + str.slice(1);
 	}
+
+	// Handle clicking on a log entry to select the corresponding edge
+	function handleLogClick(entry: FlatTrafficEntry) {
+		const srcIP = extractIP(entry.src);
+		const dstIP = extractIP(entry.dst);
+
+		// Find the edge that matches this src/dst IP pair
+		const matchingEdge = $filteredEdges.find((edge) => {
+			return (
+				(edge.originalSource === srcIP && edge.originalTarget === dstIP) ||
+				(edge.originalSource === dstIP && edge.originalTarget === srcIP)
+			);
+		});
+
+		if (matchingEdge) {
+			// Select the edge (this will deselect any selected node)
+			uiStore.selectEdge(matchingEdge.id);
+		}
+	}
 </script>
 
 <div class="flex h-full flex-col">
@@ -232,7 +251,13 @@
 				{#each flattenedEntries as entry}
 					{@const srcResolved = resolveIP(entry.src)}
 					{@const dstResolved = resolveIP(entry.dst)}
-					<tr class="border-b border-border/50 hover:bg-secondary/50">
+					<tr
+						class="border-b border-border/50 hover:bg-secondary/50 cursor-pointer"
+						onclick={() => handleLogClick(entry)}
+						role="button"
+						tabindex="0"
+						onkeydown={(e) => e.key === 'Enter' && handleLogClick(entry)}
+					>
 						<td class="whitespace-nowrap px-2 py-1 text-muted-foreground">
 							{formatDate(entry.logged).split(',')[1]?.trim() || formatDate(entry.logged)}
 						</td>

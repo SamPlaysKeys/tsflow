@@ -275,6 +275,8 @@
 				{nodeTypes}
 				{colorMode}
 				fitView
+				minZoom={0.01}
+				maxZoom={10}
 				proOptions={{ hideAttribution: true }}
 				on:nodeclick={handleNodeClick}
 				on:edgeclick={handleEdgeClick}

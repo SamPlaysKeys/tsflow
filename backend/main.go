@@ -152,6 +152,7 @@ func main() {
 
 		// New endpoints for stored historical data
 		api.GET("/flow-logs", handlerService.GetStoredFlowLogs)
+		api.GET("/flow-logs/aggregated", handlerService.GetAggregatedFlowLogs)
 		api.GET("/flow-logs/range", handlerService.GetDataRange)
 		api.GET("/bandwidth", handlerService.GetBandwidthAggregated)
 		api.GET("/poller/status", handlerService.GetPollerStatus)

@@ -52,6 +52,24 @@ type BandwidthBucket struct {
 	RxBytes int64     `json:"rxBytes"`
 }
 
+// AggregatedFlow represents aggregated node-to-node traffic for scalable queries
+type AggregatedFlow struct {
+	NodeID       string    `json:"nodeId"`
+	TrafficType  string    `json:"trafficType"`
+	SrcIP        string    `json:"srcIp"`
+	SrcPort      int       `json:"srcPort"`
+	DstIP        string    `json:"dstIp"`
+	DstPort      int       `json:"dstPort"`
+	Protocol     int       `json:"protocol"`
+	TotalTxBytes int64     `json:"totalTxBytes"`
+	TotalRxBytes int64     `json:"totalRxBytes"`
+	TotalTxPkts  int64     `json:"totalTxPkts"`
+	TotalRxPkts  int64     `json:"totalRxPkts"`
+	FlowCount    int64     `json:"flowCount"`
+	FirstSeen    time.Time `json:"firstSeen"`
+	LastSeen     time.Time `json:"lastSeen"`
+}
+
 // Store defines the interface for flow log storage
 // This abstraction allows easy migration to PostgreSQL later
 type Store interface {
@@ -91,6 +109,10 @@ type Store interface {
 
 	// GetBandwidthByIPs returns bandwidth aggregated by time bucket filtered by node IPs
 	GetBandwidthByIPs(ctx context.Context, start, end time.Time, ips []string) ([]BandwidthBucket, error)
+
+	// GetAggregatedFlows returns node-to-node traffic aggregated by src/dst IP pairs
+	// This is the scalable alternative to GetFlowLogs for large datasets
+	GetAggregatedFlows(ctx context.Context, start, end time.Time) ([]AggregatedFlow, error)
 
 	// UpdateBandwidthRollups updates the pre-aggregated bandwidth rollup tables
 	UpdateBandwidthRollups(ctx context.Context, logs []FlowLog) error
@@ -187,6 +209,9 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 
 	-- Covering index for bandwidth aggregation (query can be answered entirely from index)
 	CREATE INDEX IF NOT EXISTS idx_flow_logs_bandwidth ON flow_logs(logged_at, traffic_type, tx_bytes, rx_bytes);
+
+	-- Composite index for efficient aggregation queries (GROUP BY node_id, traffic_type, src_ip, dst_ip)
+	CREATE INDEX IF NOT EXISTS idx_flow_logs_aggregation ON flow_logs(logged_at, node_id, traffic_type, src_ip, dst_ip);
 
 	-- Poll state tracking (single row table)
 	CREATE TABLE IF NOT EXISTS poll_state (
@@ -345,6 +370,62 @@ func (s *SQLiteStore) GetFlowLogs(ctx context.Context, start, end time.Time, lim
 	}
 
 	return logs, rows.Err()
+}
+
+// GetAggregatedFlows returns node-to-node traffic aggregated by src/dst IP pairs and ports
+// This dramatically reduces data volume for large networks by grouping flows
+func (s *SQLiteStore) GetAggregatedFlows(ctx context.Context, start, end time.Time) ([]AggregatedFlow, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+		SELECT
+			node_id,
+			traffic_type,
+			MAX(protocol) as protocol,
+			src_ip,
+			0 as src_port,
+			dst_ip,
+			dst_port,
+			SUM(tx_bytes) as total_tx_bytes,
+			SUM(rx_bytes) as total_rx_bytes,
+			SUM(tx_pkts) as total_tx_pkts,
+			SUM(rx_pkts) as total_rx_pkts,
+			COUNT(*) as flow_count,
+			MIN(logged_at) as first_seen,
+			MAX(logged_at) as last_seen
+		FROM flow_logs
+		WHERE logged_at >= ? AND logged_at <= ?
+		GROUP BY node_id, traffic_type, src_ip, dst_ip, dst_port
+		ORDER BY total_tx_bytes + total_rx_bytes DESC
+	`
+
+	const sqliteFormat = "2006-01-02 15:04:05"
+	rows, err := s.db.QueryContext(ctx, query, start.UTC().Format(sqliteFormat), end.UTC().Format(sqliteFormat))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query aggregated flows: %w", err)
+	}
+	defer rows.Close()
+
+	var flows []AggregatedFlow
+	for rows.Next() {
+		var flow AggregatedFlow
+		var firstSeen, lastSeen string
+		err := rows.Scan(
+			&flow.NodeID, &flow.TrafficType, &flow.Protocol,
+			&flow.SrcIP, &flow.SrcPort, &flow.DstIP, &flow.DstPort,
+			&flow.TotalTxBytes, &flow.TotalRxBytes, &flow.TotalTxPkts, &flow.TotalRxPkts,
+			&flow.FlowCount, &firstSeen, &lastSeen,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan aggregated flow: %w", err)
+		}
+		flow.FirstSeen = parseTime(firstSeen)
+		flow.LastSeen = parseTime(lastSeen)
+		flows = append(flows, flow)
+	}
+
+	return flows, rows.Err()
 }
 
 // GetDataRange returns the available data time range

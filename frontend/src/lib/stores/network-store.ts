@@ -1,6 +1,6 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Device, NetworkLog, NetworkNode, NetworkLink } from '$lib/types';
-import { tailscaleService } from '$lib/services';
+import { tailscaleService, type AggregatedFlow } from '$lib/services';
 import { processNetworkLogs } from '$lib/utils/network-processor';
 import { filterStore, timeRangeStore, TIME_RANGES } from './filter-store';
 import { uiStore } from './ui-store';
@@ -212,10 +212,10 @@ export async function loadNetworkData() {
 		// Fetch logs based on mode
 		let logs;
 		if (dataSource.mode === 'historical') {
-			// Fetch from stored database
-			const storedLogs = await tailscaleService.getStoredFlowLogs(start, end);
-			// Convert stored logs to NetworkLog format
-			logs = convertStoredLogsToNetworkLogs(storedLogs.logs || []);
+			// Fetch aggregated flows from stored database (scalable, no limits)
+			const aggregatedData = await tailscaleService.getAggregatedFlows(start, end);
+			// Convert aggregated flows to NetworkLog format for graph
+			logs = convertAggregatedFlowsToNetworkLogs(aggregatedData.flows || []);
 		} else {
 			// Fetch live from Tailscale API
 			const logsData = await tailscaleService.getNetworkLogs(start, end);
@@ -286,6 +286,77 @@ function convertStoredLogsToNetworkLogs(storedLogs: any[]): NetworkLog[] {
 			};
 
 			switch (log.trafficType) {
+				case 'virtual':
+					networkLog.virtualTraffic.push(traffic);
+					break;
+				case 'subnet':
+					networkLog.subnetTraffic.push(traffic);
+					break;
+				case 'physical':
+					networkLog.physicalTraffic.push(traffic);
+					break;
+			}
+		}
+
+		networkLogs.push(networkLog);
+	}
+
+	return networkLogs;
+}
+
+// Convert aggregated flows to NetworkLog format for the graph
+// Each aggregated flow includes protocol and port information
+function convertAggregatedFlowsToNetworkLogs(flows: AggregatedFlow[]): NetworkLog[] {
+	// Group by nodeId to create NetworkLog entries
+	const grouped = new Map<string, AggregatedFlow[]>();
+
+	for (const flow of flows) {
+		const key = flow.nodeId;
+		if (!grouped.has(key)) {
+			grouped.set(key, []);
+		}
+		grouped.get(key)!.push(flow);
+	}
+
+	// Helper to format IP:port correctly for IPv4 and IPv6
+	const formatAddress = (ip: string, port: number): string => {
+		if (ip.includes(':')) {
+			// IPv6: use [ip]:port format
+			return `[${ip}]:${port}`;
+		}
+		return `${ip}:${port}`;
+	};
+
+	const networkLogs: NetworkLog[] = [];
+
+	for (const [nodeId, nodeFlows] of grouped) {
+		if (nodeFlows.length === 0) continue;
+
+		const first = nodeFlows[0];
+		const last = nodeFlows[nodeFlows.length - 1];
+
+		const networkLog: NetworkLog = {
+			logged: last.lastSeen,
+			nodeId: nodeId,
+			start: first.firstSeen,
+			end: last.lastSeen,
+			virtualTraffic: [],
+			subnetTraffic: [],
+			physicalTraffic: []
+		};
+
+		for (const flow of nodeFlows) {
+			const traffic = {
+				proto: flow.protocol,
+				src: formatAddress(flow.srcIp, flow.srcPort),
+				dst: formatAddress(flow.dstIp, flow.dstPort),
+				txBytes: flow.totalTxBytes,
+				rxBytes: flow.totalRxBytes,
+				txPkts: flow.totalTxPkts,
+				rxPkts: flow.totalRxPkts
+			};
+
+			switch (flow.trafficType) {
 				case 'virtual':
 					networkLog.virtualTraffic.push(traffic);
 					break;
