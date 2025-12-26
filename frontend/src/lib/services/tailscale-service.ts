@@ -94,7 +94,7 @@ export const tailscaleService = {
 	},
 
 	// New methods for stored historical data
-	async getStoredFlowLogs(start: Date, end: Date, limit = 10000): Promise<StoredFlowLogsResponse> {
+	async getStoredFlowLogs(start: Date, end: Date, limit = 50000): Promise<StoredFlowLogsResponse> {
 		const startISO = start.toISOString();
 		const endISO = end.toISOString();
 		return api.get<StoredFlowLogsResponse>(

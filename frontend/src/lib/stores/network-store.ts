@@ -250,6 +250,16 @@ function convertStoredLogsToNetworkLogs(storedLogs: any[]): NetworkLog[] {
 	// Convert to NetworkLog format
 	const networkLogs: NetworkLog[] = [];
 
+	// Helper to format IP:port correctly for IPv4 and IPv6
+	const formatAddress = (ip: string, port: number): string => {
+		if (ip.includes(':')) {
+			// IPv6: use [ip]:port format
+			return `[${ip}]:${port}`;
+		}
+		// IPv4: use ip:port format
+		return `${ip}:${port}`;
+	};
+
 	for (const [, logs] of grouped) {
 		if (logs.length === 0) continue;
 
@@ -267,8 +277,8 @@ function convertStoredLogsToNetworkLogs(storedLogs: any[]): NetworkLog[] {
 		for (const log of logs) {
 			const traffic = {
 				proto: log.protocol,
-				src: `${log.srcIp}:${log.srcPort}`,
-				dst: `${log.dstIp}:${log.dstPort}`,
+				src: formatAddress(log.srcIp, log.srcPort),
+				dst: formatAddress(log.dstIp, log.dstPort),
 				txBytes: log.txBytes,
 				rxBytes: log.rxBytes,
 				txPkts: log.txPkts,
