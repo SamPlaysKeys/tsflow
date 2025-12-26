@@ -134,10 +134,26 @@
 		};
 	});
 
-	// Format time for axis
+	// Format time for axis - include date if range spans multiple days
 	function formatTime(time: Date): string {
+		const { minTime, maxTime } = chartBounds;
+		const rangeMs = maxTime - minTime;
+		const dayMs = 24 * 60 * 60 * 1000;
+
+		if (rangeMs > dayMs) {
+			// Show date + time for multi-day ranges
+			return time.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
+				' ' + time.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+		}
 		return time.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 	}
+
+	// Calculate full totals (all chart data)
+	const fullTotals = $derived.by(() => {
+		const tx = chartData.reduce((sum, d) => sum + d.txBytes, 0);
+		const rx = chartData.reduce((sum, d) => sum + d.rxBytes, 0);
+		return { tx, rx, total: tx + rx };
+	});
 
 	// Calculate totals for selected range only (in historical mode) or all data
 	const totals = $derived.by(() => {
@@ -145,20 +161,29 @@
 		const selectedEnd = $dataSourceStore.selectedEnd;
 		const mode = $dataSourceStore.mode;
 
-		let dataToSum = chartData;
-
-		// In historical mode, only sum data within selected range
-		if (mode === 'historical' && selectedStart && selectedEnd) {
-			dataToSum = chartData.filter((d) => {
-				const t = d.time.getTime();
-				return t >= selectedStart.getTime() && t <= selectedEnd.getTime();
-			});
+		// In live mode or if no selection, use full totals
+		if (mode !== 'historical' || !selectedStart || !selectedEnd) {
+			return fullTotals;
 		}
+
+		// In historical mode, sum data within selected range
+		const dataToSum = chartData.filter((d) => {
+			const t = d.time.getTime();
+			return t >= selectedStart.getTime() && t <= selectedEnd.getTime();
+		});
 
 		const tx = dataToSum.reduce((sum, d) => sum + d.txBytes, 0);
 		const rx = dataToSum.reduce((sum, d) => sum + d.rxBytes, 0);
 		return { tx, rx, total: tx + rx };
 	});
+
+	// Check if we're showing a subset of data
+	const isShowingSubset = $derived(
+		$dataSourceStore.mode === 'historical' &&
+		$dataSourceStore.selectedStart !== null &&
+		$dataSourceStore.selectedEnd !== null &&
+		totals.total !== fullTotals.total
+	);
 
 	// Generate time axis ticks
 	const timeAxisTicks = $derived.by(() => {
@@ -193,7 +218,7 @@
 		<div class="flex items-center gap-4">
 			<span class="text-xs font-medium text-muted-foreground">
 				Bandwidth Over Time
-				{#if $dataSourceStore.mode === 'historical'}
+				{#if isShowingSubset}
 					<span class="text-primary/70">(selected range)</span>
 				{/if}
 			</span>
@@ -209,6 +234,11 @@
 				<span class="text-muted-foreground">
 					Total: {formatBytes(totals.total)}
 				</span>
+				{#if isShowingSubset}
+					<span class="text-muted-foreground/60">
+						| All: {formatBytes(fullTotals.total)}
+					</span>
+				{/if}
 			</div>
 		</div>
 		{#if chartData.length > 0}

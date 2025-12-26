@@ -1,8 +1,27 @@
 <script lang="ts">
-	import { networkLogs, uiStore, filteredNodes, filteredEdges, filterStore } from '$lib/stores';
+	import { networkLogs, uiStore, filteredNodes, filteredEdges, filterStore, devices } from '$lib/stores';
 	import { formatBytes, formatDate, extractIP, getProtocolName } from '$lib/utils';
 	import { ArrowRight } from 'lucide-svelte';
 	import type { NetworkLog } from '$lib/types';
+
+	// Build IP to device name lookup map
+	const ipToDevice = $derived.by(() => {
+		const map = new Map<string, string>();
+		for (const device of $devices) {
+			const displayName = device.hostname || device.name.split('.')[0];
+			for (const addr of device.addresses) {
+				map.set(addr, displayName);
+			}
+		}
+		return map;
+	});
+
+	// Helper to resolve IP to device name or return the IP
+	function resolveIP(address: string): { ip: string; deviceName?: string } {
+		const ip = extractIP(address);
+		const deviceName = ipToDevice.get(ip);
+		return { ip, deviceName };
+	}
 
 	// Flatten traffic entries for display
 	interface FlatTrafficEntry {
@@ -154,6 +173,8 @@
 			</thead>
 			<tbody>
 				{#each flattenedEntries as entry}
+					{@const srcResolved = resolveIP(entry.src)}
+					{@const dstResolved = resolveIP(entry.dst)}
 					<tr class="border-b border-border/50 hover:bg-secondary/50">
 						<td class="whitespace-nowrap px-2 py-1 text-muted-foreground">
 							{formatDate(entry.logged).split(',')[1]?.trim() || formatDate(entry.logged)}
@@ -166,9 +187,21 @@
 						</td>
 						<td class="px-2 py-1">
 							<div class="flex items-center gap-1">
-								<span class="truncate" title={entry.src}>{extractIP(entry.src)}</span>
+								<span class="truncate" title={srcResolved.deviceName ? `${srcResolved.deviceName} (${srcResolved.ip})` : srcResolved.ip}>
+									{#if srcResolved.deviceName}
+										<span class="text-primary">{srcResolved.deviceName}</span>
+									{:else}
+										{srcResolved.ip}
+									{/if}
+								</span>
 								<ArrowRight class="h-3 w-3 shrink-0 text-muted-foreground" />
-								<span class="truncate" title={entry.dst}>{extractIP(entry.dst)}</span>
+								<span class="truncate" title={dstResolved.deviceName ? `${dstResolved.deviceName} (${dstResolved.ip})` : dstResolved.ip}>
+									{#if dstResolved.deviceName}
+										<span class="text-primary">{dstResolved.deviceName}</span>
+									{:else}
+										{dstResolved.ip}
+									{/if}
+								</span>
 							</div>
 						</td>
 						<td class="px-2 py-1">
