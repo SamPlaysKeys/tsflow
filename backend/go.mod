@@ -8,7 +8,7 @@ require (
 	github.com/gin-contrib/cors v1.7.6
 	github.com/gin-contrib/gzip v1.2.3
 	github.com/gin-gonic/gin v1.11.0
-	github.com/joho/godotenv v1.4.0
+	github.com/joho/godotenv v1.5.1
 	modernc.org/sqlite v1.41.0
 	tailscale.com/client/tailscale/v2 v2.0.0-20250820140259-740bf1718a90
 )
