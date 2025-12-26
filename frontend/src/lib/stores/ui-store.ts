@@ -61,3 +61,25 @@ export const highlightedNodeIds = derived(
 
 // Check if there's any selection
 export const hasSelection = derived(uiStore, ($ui) => $ui.selectedNodeId !== null || $ui.selectedEdgeId !== null);
+
+// Derived store for highlighted edges based on selection
+export const highlightedEdgeIds = derived(
+	[uiStore, filteredEdges],
+	([$ui, $edges]) => {
+		const highlighted = new Set<string>();
+
+		if ($ui.selectedNodeId) {
+			// Highlight edges connected to selected node
+			$edges.forEach((edge) => {
+				if (edge.source === $ui.selectedNodeId || edge.target === $ui.selectedNodeId) {
+					highlighted.add(edge.id);
+				}
+			});
+		} else if ($ui.selectedEdgeId) {
+			// Highlight the selected edge
+			highlighted.add($ui.selectedEdgeId);
+		}
+
+		return highlighted;
+	}
+);

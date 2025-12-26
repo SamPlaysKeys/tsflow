@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -87,6 +88,9 @@ type Store interface {
 
 	// GetBandwidthAggregated returns aggregated bandwidth data in time buckets
 	GetBandwidthAggregated(ctx context.Context, start, end time.Time, bucketSeconds int) ([]BandwidthBucket, error)
+
+	// GetBandwidthByIPs returns bandwidth aggregated by time bucket filtered by node IPs
+	GetBandwidthByIPs(ctx context.Context, start, end time.Time, ips []string) ([]BandwidthBucket, error)
 
 	// UpdateBandwidthRollups updates the pre-aggregated bandwidth rollup tables
 	UpdateBandwidthRollups(ctx context.Context, logs []FlowLog) error
@@ -557,6 +561,85 @@ func (s *SQLiteStore) GetBandwidthAggregated(ctx context.Context, start, end tim
 	rows, err := s.db.QueryContext(ctx, query, startBucket, endBucket)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query bandwidth rollup: %w", err)
+	}
+	defer rows.Close()
+
+	var buckets []BandwidthBucket
+	for rows.Next() {
+		var bucket int64
+		var txBytes, rxBytes int64
+		if err := rows.Scan(&bucket, &txBytes, &rxBytes); err != nil {
+			return nil, fmt.Errorf("failed to scan bucket: %w", err)
+		}
+		buckets = append(buckets, BandwidthBucket{
+			Time:    time.Unix(bucket, 0).UTC(),
+			TxBytes: txBytes,
+			RxBytes: rxBytes,
+		})
+	}
+
+	return buckets, rows.Err()
+}
+
+// GetBandwidthByIPs returns bandwidth aggregated by time bucket filtered by node IPs
+// When IPs are provided, only traffic where src_ip or dst_ip matches is included
+func (s *SQLiteStore) GetBandwidthByIPs(ctx context.Context, start, end time.Time, ips []string) ([]BandwidthBucket, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(ips) == 0 {
+		// No IPs provided, return all bandwidth
+		return s.GetBandwidthAggregated(ctx, start, end, 0)
+	}
+
+	// Use the same format that SQLite stores time.Time values
+	const sqliteFormat = "2006-01-02 15:04:05"
+	startStr := start.UTC().Format(sqliteFormat)
+	endStr := end.UTC().Format(sqliteFormat)
+
+	// Determine bucket size based on time range
+	rangeSeconds := int64(end.Sub(start).Seconds())
+	var bucketSize int64
+
+	switch {
+	case rangeSeconds <= 24*3600: // <= 24 hours: minutely buckets
+		bucketSize = 60
+	case rangeSeconds <= 7*24*3600: // <= 7 days: hourly buckets
+		bucketSize = 3600
+	default: // > 7 days: daily buckets
+		bucketSize = 86400
+	}
+
+	// Build placeholder list for IPs
+	placeholders := make([]string, len(ips))
+	args := make([]interface{}, 0, len(ips)*2+2)
+	args = append(args, startStr, endStr)
+	for i, ip := range ips {
+		placeholders[i] = "?"
+		args = append(args, ip)
+	}
+	ipList := strings.Join(placeholders, ", ")
+
+	// Also add IPs again for the second IN clause
+	for _, ip := range ips {
+		args = append(args, ip)
+	}
+
+	query := fmt.Sprintf(`
+		SELECT
+			(CAST(strftime('%%s', substr(logged_at, 1, 19)) AS INTEGER) / %d) * %d as bucket,
+			SUM(tx_bytes) as tx_bytes,
+			SUM(rx_bytes) as rx_bytes
+		FROM flow_logs
+		WHERE logged_at >= ? AND logged_at <= ?
+		AND (src_ip IN (%s) OR dst_ip IN (%s))
+		GROUP BY bucket
+		ORDER BY bucket ASC
+	`, bucketSize, bucketSize, ipList, ipList)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query bandwidth by IPs: %w", err)
 	}
 	defer rows.Close()
 

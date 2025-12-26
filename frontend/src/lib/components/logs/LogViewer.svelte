@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { networkLogs, uiStore, filteredNodes, filteredEdges, filterStore, devices } from '$lib/stores';
+	import { networkLogs, uiStore, filteredNodes, filteredEdges, filterStore, devices, primaryMatchedNodes } from '$lib/stores';
 	import { formatBytes, formatDate, extractIP, getProtocolName } from '$lib/utils';
 	import { ArrowRight } from 'lucide-svelte';
 	import type { NetworkLog } from '$lib/types';
@@ -34,13 +34,26 @@
 		trafficType: string;
 	}
 
-	// Filter logs based on selection and traffic type filters
+	// Build a set of IPs from primary matched nodes for log filtering
+	const primaryMatchedIPs = $derived.by(() => {
+		const ips = new Set<string>();
+		for (const node of $primaryMatchedNodes) {
+			for (const ip of node.ips) {
+				ips.add(ip);
+			}
+		}
+		return ips;
+	});
+
+	// Filter logs based on selection, search, and traffic type filters
 	const filteredLogs = $derived.by(() => {
 		const selectedNodeId = $uiStore.selectedNodeId;
 		const selectedEdgeId = $uiStore.selectedEdgeId;
+		const searchQuery = $filterStore.search;
 		const logs = $networkLogs;
 
-		if (!selectedNodeId && !selectedEdgeId) {
+		// No filters active - show recent logs
+		if (!selectedNodeId && !selectedEdgeId && !searchQuery) {
 			return logs.slice(0, 100);
 		}
 
@@ -55,6 +68,7 @@
 				const srcIP = extractIP(traffic.src);
 				const dstIP = extractIP(traffic.dst);
 
+				// If a specific node is selected, filter to that node
 				if (selectedNodeId) {
 					const selectedNode = $filteredNodes.find((n) => n.id === selectedNodeId);
 					if (selectedNode) {
@@ -63,6 +77,7 @@
 					}
 				}
 
+				// If a specific edge is selected, filter to that edge
 				if (selectedEdgeId) {
 					const selectedEdge = $filteredEdges.find((e) => e.id === selectedEdgeId);
 					if (selectedEdge) {
@@ -73,15 +88,40 @@
 					}
 				}
 
+				// If searching, filter to logs involving primary matched nodes
+				if (searchQuery && primaryMatchedIPs.size > 0) {
+					return primaryMatchedIPs.has(srcIP) || primaryMatchedIPs.has(dstIP);
+				}
+
 				return false;
 			});
 		});
 	});
 
-	// Flatten logs into individual traffic entries, respecting traffic type filter
+	// Flatten logs into individual traffic entries, respecting traffic type filter AND node selection
 	const flattenedEntries = $derived.by(() => {
 		const entries: FlatTrafficEntry[] = [];
 		const activeTrafficTypes = $filterStore.trafficTypes;
+		const selectedNodeId = $uiStore.selectedNodeId;
+		const selectedEdgeId = $uiStore.selectedEdgeId;
+
+		// Get selected node's IPs for filtering individual traffic entries
+		let selectedNodeIPs: string[] = [];
+		if (selectedNodeId) {
+			const selectedNode = $filteredNodes.find((n) => n.id === selectedNodeId);
+			if (selectedNode) {
+				selectedNodeIPs = selectedNode.ips;
+			}
+		}
+
+		// Get selected edge endpoints for filtering
+		let selectedEdge: { source: string; target: string } | null = null;
+		if (selectedEdgeId) {
+			const edge = $filteredEdges.find((e) => e.id === selectedEdgeId);
+			if (edge) {
+				selectedEdge = { source: edge.originalSource, target: edge.originalTarget };
+			}
+		}
 
 		filteredLogs.forEach((log: NetworkLog) => {
 			const addEntries = (traffic: any[], type: string) => {
@@ -91,6 +131,23 @@
 				}
 
 				traffic.forEach((t) => {
+					const srcIP = extractIP(t.src);
+					const dstIP = extractIP(t.dst);
+
+					// If a node is selected, only include traffic entries that involve that node
+					if (selectedNodeIPs.length > 0) {
+						const matchesNode = selectedNodeIPs.some((ip) => ip === srcIP || ip === dstIP);
+						if (!matchesNode) return;
+					}
+
+					// If an edge is selected, only include traffic entries for that edge
+					if (selectedEdge) {
+						const matchesEdge =
+							(srcIP === selectedEdge.source && dstIP === selectedEdge.target) ||
+							(srcIP === selectedEdge.target && dstIP === selectedEdge.source);
+						if (!matchesEdge) return;
+					}
+
 					entries.push({
 						logged: log.logged,
 						src: t.src,

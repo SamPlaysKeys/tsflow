@@ -13,6 +13,7 @@
 	} from '@xyflow/svelte';
 	import '@xyflow/svelte/dist/style.css';
 	import { uiStore, themeStore } from '$lib/stores';
+	import { highlightedEdgeIds, hasSelection } from '$lib/stores/ui-store';
 	import { applyElkLayout } from '$lib/utils/elk-layout';
 	import type { NetworkNode as NetworkNodeType, NetworkLink } from '$lib/types';
 	import NetworkNode from './NetworkNode.svelte';
@@ -29,8 +30,8 @@
 		network: NetworkNode as any
 	};
 
-	// Get edge style based on traffic type
-	function getEdgeStyle(edge: NetworkLink): string {
+	// Get edge style based on traffic type and selection state
+	function getEdgeStyle(edge: NetworkLink, dimmed: boolean = false): string {
 		let strokeColor = 'var(--color-muted-foreground)';
 
 		switch (edge.trafficType) {
@@ -51,8 +52,12 @@
 		else if (edge.totalBytes > 1000000) strokeWidth = 3;
 		else if (edge.totalBytes > 100000) strokeWidth = 2;
 
-		return `stroke: ${strokeColor}; stroke-width: ${strokeWidth}px;`;
+		const opacity = dimmed ? 0.15 : 1;
+		return `stroke: ${strokeColor}; stroke-width: ${strokeWidth}px; opacity: ${opacity};`;
 	}
+
+	// Keep track of original edges for style updates
+	let originalEdges: NetworkLink[] = [];
 
 	// Map our theme to xyflow colorMode
 	const colorMode = $derived.by((): ColorMode => {
@@ -120,8 +125,31 @@
 		// Only re-layout if nodes changed
 		if (currentNodeIds !== lastNodeIds && nodes.length > 0) {
 			lastNodeIds = currentNodeIds;
+			originalEdges = edges; // Store for style updates
 			layoutNodes();
 		}
+	});
+
+	// Update edge styles when selection changes
+	$effect(() => {
+		const highlighted = $highlightedEdgeIds;
+		const isSelectionActive = $hasSelection;
+
+		// Only update if we have edges and not currently layouting
+		if (originalEdges.length === 0 || isLayouting) return;
+
+		flowEdgesStore.update((currentEdges) => {
+			return currentEdges.map((flowEdge) => {
+				const originalEdge = originalEdges.find((e) => e.id === flowEdge.id);
+				if (!originalEdge) return flowEdge;
+
+				const dimmed = isSelectionActive && !highlighted.has(flowEdge.id);
+				return {
+					...flowEdge,
+					style: getEdgeStyle(originalEdge, dimmed)
+				};
+			});
+		});
 	});
 
 	async function layoutNodes() {

@@ -16,6 +16,7 @@ export {
 	processedNetwork,
 	filteredNodes,
 	filteredEdges,
+	primaryMatchedNodes,
 	networkStats,
 	loadNetworkData,
 	startAutoRefresh,

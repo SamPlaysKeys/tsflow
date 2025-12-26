@@ -110,12 +110,12 @@ export const tailscaleService = {
 		return api.get<PollerStatus>('/poller/status');
 	},
 
-	async getBandwidth(start: Date, end: Date, bucketSeconds?: number): Promise<BandwidthResponse> {
+	async getBandwidth(start: Date, end: Date, ips?: string[]): Promise<BandwidthResponse> {
 		const startISO = start.toISOString();
 		const endISO = end.toISOString();
 		let url = `/bandwidth?start=${startISO}&end=${endISO}`;
-		if (bucketSeconds) {
-			url += `&bucket=${bucketSeconds}`;
+		if (ips && ips.length > 0) {
+			url += `&ips=${ips.join(',')}`;
 		}
 		return api.get<BandwidthResponse>(url);
 	}

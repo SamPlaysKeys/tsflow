@@ -101,7 +101,7 @@ function createTimeRangeStore() {
 				return { start, end };
 			}
 
-			// Default to 5 minutes
+			// Fallback to 5 minutes
 			const end = new Date();
 			const start = new Date(end.getTime() - 5 * 60 * 1000);
 			return { start, end };

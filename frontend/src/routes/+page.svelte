@@ -4,6 +4,7 @@
 	import NetworkGraph from '$lib/components/graph/NetworkGraph.svelte';
 	import FilterPanel from '$lib/components/filters/FilterPanel.svelte';
 	import LogViewer from '$lib/components/logs/LogViewer.svelte';
+	import PortDetails from '$lib/components/logs/PortDetails.svelte';
 	import BandwidthChart from '$lib/components/charts/BandwidthChart.svelte';
 	import Header from '$lib/components/layout/Header.svelte';
 	import { loadNetworkData, filteredNodes, filteredEdges } from '$lib/stores/network-store';
@@ -81,10 +82,13 @@
 				</div>
 			{/if}
 
-			<!-- Bottom Panel: Bandwidth Chart + Log Viewer -->
+			<!-- Bottom Panel: Bandwidth Chart + Port Details + Log Viewer -->
 			{#if $uiStore.showLogViewer}
 				<!-- Bandwidth Chart -->
 				<BandwidthChart />
+
+				<!-- Port Details (shows when node selected) -->
+				<PortDetails />
 
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<!-- Resize Handle -->

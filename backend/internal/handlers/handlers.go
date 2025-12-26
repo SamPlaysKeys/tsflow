@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -372,18 +373,9 @@ func (h *Handlers) GetBandwidthAggregated(c *gin.Context) {
 
 	start := c.Query("start")
 	end := c.Query("end")
-	bucketStr := c.Query("bucket")
+	ipsStr := c.Query("ips") // Comma-separated list of IPs to filter by
 
-	// If no bucket specified, pass 0 to let the database layer auto-calculate optimal size
-	var bucketSeconds int
 	var err error
-	if bucketStr != "" {
-		bucketSeconds, err = strconv.Atoi(bucketStr)
-		if err != nil || bucketSeconds < 0 {
-			bucketSeconds = 0
-		}
-	}
-
 	var startTime, endTime time.Time
 
 	if start == "" {
@@ -409,7 +401,19 @@ func (h *Handlers) GetBandwidthAggregated(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
 	defer cancel()
 
-	buckets, err := h.store.GetBandwidthAggregated(ctx, startTime, endTime, bucketSeconds)
+	var buckets []database.BandwidthBucket
+
+	// If IPs provided, filter by those IPs
+	if ipsStr != "" {
+		ips := strings.Split(ipsStr, ",")
+		for i := range ips {
+			ips[i] = strings.TrimSpace(ips[i])
+		}
+		buckets, err = h.store.GetBandwidthByIPs(ctx, startTime, endTime, ips)
+	} else {
+		buckets, err = h.store.GetBandwidthAggregated(ctx, startTime, endTime, 0)
+	}
+
 	if err != nil {
 		log.Printf("ERROR GetBandwidthAggregated: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -422,10 +426,10 @@ func (h *Handlers) GetBandwidthAggregated(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"buckets": buckets,
 		"metadata": gin.H{
-			"count":         len(buckets),
-			"start":         startTime,
-			"end":           endTime,
-			"bucketSeconds": bucketSeconds,
+			"count": len(buckets),
+			"start": startTime,
+			"end":   endTime,
+			"ips":   ipsStr,
 		},
 	})
 }

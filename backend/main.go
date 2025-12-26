@@ -90,6 +90,11 @@ func main() {
 			pollerConfig.PollInterval = d
 		}
 	}
+	if backfill := os.Getenv("TSFLOW_INITIAL_BACKFILL"); backfill != "" {
+		if d, err := time.ParseDuration(backfill); err == nil {
+			pollerConfig.InitialBackfill = d
+		}
+	}
 	if retention := os.Getenv("TSFLOW_RETENTION"); retention != "" {
 		if d, err := time.ParseDuration(retention); err == nil {
 			pollerConfig.RetentionPeriod = d

@@ -2,7 +2,7 @@ import { writable, derived, get } from 'svelte/store';
 import type { Device, NetworkLog, NetworkNode, NetworkLink } from '$lib/types';
 import { tailscaleService } from '$lib/services';
 import { processNetworkLogs } from '$lib/utils/network-processor';
-import { filterStore, timeRangeStore } from './filter-store';
+import { filterStore, timeRangeStore, TIME_RANGES } from './filter-store';
 import { uiStore } from './ui-store';
 import { dataSourceStore } from './data-source-store';
 
@@ -41,52 +41,106 @@ const nodesWithTrafficConnections = derived(trafficFilteredEdges, ($edges) => {
 	return nodeIds;
 });
 
-// Filtered nodes based on filter settings - only show nodes with traffic connections
-export const filteredNodes = derived(
+// Helper to check if a node matches the search query
+function nodeMatchesSearch(node: NetworkNode, query: string): boolean {
+	if (!query) return true;
+
+	const q = query.toLowerCase().trim();
+
+	if (q.startsWith('tag:')) {
+		const tagSearch = q.substring(4);
+		const nodeTagsLower = node.tags.map((t) => t.toLowerCase().replace('tag:', ''));
+		return nodeTagsLower.some((tag) => tag.includes(tagSearch));
+	} else if (q.startsWith('ip:')) {
+		const ipSearch = q.substring(3);
+		return node.ips.some((ip) => ip.toLowerCase().includes(ipSearch));
+	} else if (q.includes('@')) {
+		return node.user?.toLowerCase().includes(q.replace('user@', '')) || false;
+	} else {
+		const matchesIP = node.ips.some((ip) => ip.toLowerCase().includes(q));
+		const matchesName = node.displayName.toLowerCase().includes(q);
+		const matchesUser = node.user?.toLowerCase().includes(q) || false;
+		const matchesTags = node.tags.some((tag) =>
+			tag.toLowerCase().replace('tag:', '').includes(q)
+		);
+		return matchesIP || matchesName || matchesUser || matchesTags;
+	}
+}
+
+// Primary matched nodes (nodes directly matching the search query)
+export const primaryMatchedNodes = derived(
 	[processedNetwork, filterStore, nodesWithTrafficConnections],
 	([$network, $filters, $connectedNodeIds]) => {
 		return $network.nodes.filter((node) => {
-			// First check if node has any connections after traffic type filtering
 			if (!$connectedNodeIds.has(node.id)) return false;
+			return nodeMatchesSearch(node, $filters.search);
+		});
+	}
+);
 
-			// Search filter
+// Get IDs of nodes connected to primary matches
+const connectedToMatchedNodes = derived(
+	[primaryMatchedNodes, trafficFilteredEdges],
+	([$primaryNodes, $edges]) => {
+		const primaryIds = new Set($primaryNodes.map((n) => n.id));
+		const connectedIds = new Set<string>();
+
+		// If no search filter, no need to expand - primaryIds contains all valid nodes
+		if (primaryIds.size === 0) return connectedIds;
+
+		// Find all nodes connected to primary matches
+		$edges.forEach((edge) => {
+			if (primaryIds.has(edge.source)) {
+				connectedIds.add(edge.target);
+			}
+			if (primaryIds.has(edge.target)) {
+				connectedIds.add(edge.source);
+			}
+		});
+
+		return connectedIds;
+	}
+);
+
+// Filtered nodes: primary matches + their connected nodes
+export const filteredNodes = derived(
+	[processedNetwork, primaryMatchedNodes, connectedToMatchedNodes, nodesWithTrafficConnections, filterStore],
+	([$network, $primaryNodes, $connectedIds, $connectedNodeIds, $filters]) => {
+		const primaryIds = new Set($primaryNodes.map((n) => n.id));
+
+		// If no search, return all nodes with connections
+		if (!$filters.search) {
+			return $network.nodes.filter((node) => $connectedNodeIds.has(node.id));
+		}
+
+		// Return primary matches + connected nodes
+		return $network.nodes.filter((node) => {
+			if (!$connectedNodeIds.has(node.id)) return false;
+			return primaryIds.has(node.id) || $connectedIds.has(node.id);
+		});
+	}
+);
+
+// Filtered edges - show edges where at least one endpoint is a primary match
+export const filteredEdges = derived(
+	[trafficFilteredEdges, filteredNodes, primaryMatchedNodes, filterStore],
+	([$trafficEdges, $nodes, $primaryNodes, $filters]) => {
+		const nodeIds = new Set($nodes.map((n) => n.id));
+		const primaryIds = new Set($primaryNodes.map((n) => n.id));
+
+		return $trafficEdges.filter((link) => {
+			// Both nodes must be visible
+			if (!nodeIds.has(link.source) || !nodeIds.has(link.target)) return false;
+
+			// If searching, at least one endpoint must be a primary match
 			if ($filters.search) {
-				const query = $filters.search.toLowerCase().trim();
-
-				if (query.startsWith('tag:')) {
-					const tagSearch = query.substring(4);
-					const nodeTagsLower = node.tags.map((t) => t.toLowerCase().replace('tag:', ''));
-					if (!nodeTagsLower.some((tag) => tag.includes(tagSearch))) return false;
-				} else if (query.startsWith('ip:')) {
-					const ipSearch = query.substring(3);
-					if (!node.ips.some((ip) => ip.toLowerCase().includes(ipSearch))) return false;
-				} else if (query.includes('@')) {
-					if (!node.user?.toLowerCase().includes(query.replace('user@', ''))) return false;
-				} else {
-					const matchesIP = node.ips.some((ip) => ip.toLowerCase().includes(query));
-					const matchesName = node.displayName.toLowerCase().includes(query);
-					const matchesUser = node.user?.toLowerCase().includes(query) || false;
-					const matchesTags = node.tags.some((tag) =>
-						tag.toLowerCase().replace('tag:', '').includes(query)
-					);
-					if (!matchesIP && !matchesName && !matchesUser && !matchesTags) return false;
-				}
+				return primaryIds.has(link.source) || primaryIds.has(link.target);
 			}
 
 			return true;
 		});
 	}
 );
-
-// Filtered edges - show edges where both nodes are visible
-export const filteredEdges = derived([trafficFilteredEdges, filteredNodes], ([$trafficEdges, $nodes]) => {
-	const nodeIds = new Set($nodes.map((n) => n.id));
-
-	return $trafficEdges.filter((link) => {
-		// Only show edges where both nodes are visible after all filtering
-		return nodeIds.has(link.source) && nodeIds.has(link.target);
-	});
-});
 
 // Network stats
 export const networkStats = derived([filteredNodes, filteredEdges], ([$nodes, $edges]) => {
@@ -142,17 +196,7 @@ export async function loadNetworkData() {
 				start = timeRange.customStart;
 				end = timeRange.customEnd;
 			} else {
-				const preset = [
-					{ value: '1m', minutes: 1 },
-					{ value: '5m', minutes: 5 },
-					{ value: '15m', minutes: 15 },
-					{ value: '30m', minutes: 30 },
-					{ value: '1h', minutes: 60 },
-					{ value: '6h', minutes: 360 },
-					{ value: '24h', minutes: 1440 },
-					{ value: '7d', minutes: 10080 },
-					{ value: '30d', minutes: 43200 }
-				].find((p) => p.value === timeRange.selected);
+				const preset = TIME_RANGES.find((p) => p.value === timeRange.selected);
 
 				end = new Date();
 				start = new Date(end.getTime() - (preset?.minutes || 5) * 60 * 1000);
