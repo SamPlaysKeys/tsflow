@@ -5,31 +5,41 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-// FlowLog represents a stored network flow log entry
-type FlowLog struct {
-	ID          int64     `json:"id"`
-	LoggedAt    time.Time `json:"loggedAt"`
-	NodeID      string    `json:"nodeId"`
-	PeriodStart time.Time `json:"periodStart"`
-	PeriodEnd   time.Time `json:"periodEnd"`
-	TrafficType string    `json:"trafficType"` // virtual, subnet, physical
-	Protocol    int       `json:"protocol"`
-	SrcIP       string    `json:"srcIp"`
-	SrcPort     int       `json:"srcPort"`
-	DstIP       string    `json:"dstIp"`
-	DstPort     int       `json:"dstPort"`
-	TxBytes     int64     `json:"txBytes"`
-	RxBytes     int64     `json:"rxBytes"`
-	TxPkts      int64     `json:"txPkts"`
-	RxPkts      int64     `json:"rxPkts"`
-	CreatedAt   time.Time `json:"createdAt"`
+// NodePairAggregate represents pre-computed node-to-node traffic
+// This is the primary data structure for graph rendering
+type NodePairAggregate struct {
+	Bucket      int64  `json:"bucket"`      // Time bucket (unix timestamp)
+	SrcNodeID   string `json:"srcNodeId"`   // Source device ID or IP
+	DstNodeID   string `json:"dstNodeId"`   // Destination device ID or IP
+	TrafficType string `json:"trafficType"` // virtual, subnet, physical
+	TxBytes     int64  `json:"txBytes"`
+	RxBytes     int64  `json:"rxBytes"`
+	TxPkts      int64  `json:"txPkts"`
+	RxPkts      int64  `json:"rxPkts"`
+	FlowCount   int64  `json:"flowCount"`
+	Protocols   string `json:"protocols"` // JSON array of protocols seen
+	Ports       string `json:"ports"`     // JSON array of top ports
+}
+
+// BandwidthBucket represents aggregated bandwidth for a time bucket
+type BandwidthBucket struct {
+	Time    time.Time `json:"time"`
+	TxBytes int64     `json:"txBytes"`
+	RxBytes int64     `json:"rxBytes"`
+}
+
+// NodeBandwidth represents bandwidth for a specific node
+type NodeBandwidth struct {
+	Bucket  int64  `json:"bucket"`
+	NodeID  string `json:"nodeId"`
+	TxBytes int64  `json:"txBytes"`
+	RxBytes int64  `json:"rxBytes"`
 }
 
 // PollState tracks the polling state
@@ -42,115 +52,63 @@ type PollState struct {
 type DataRange struct {
 	Earliest time.Time `json:"earliest"`
 	Latest   time.Time `json:"latest"`
-	Count    int64     `json:"count"`
 }
 
-// BandwidthBucket represents aggregated bandwidth for a time bucket
-type BandwidthBucket struct {
-	Time    time.Time `json:"time"`
-	TxBytes int64     `json:"txBytes"`
-	RxBytes int64     `json:"rxBytes"`
-}
-
-// AggregatedFlow represents aggregated node-to-node traffic for scalable queries
-type AggregatedFlow struct {
-	NodeID       string    `json:"nodeId"`
-	TrafficType  string    `json:"trafficType"`
-	SrcIP        string    `json:"srcIp"`
-	SrcPort      int       `json:"srcPort"`
-	DstIP        string    `json:"dstIp"`
-	DstPort      int       `json:"dstPort"`
-	Protocol     int       `json:"protocol"`
-	TotalTxBytes int64     `json:"totalTxBytes"`
-	TotalRxBytes int64     `json:"totalRxBytes"`
-	TotalTxPkts  int64     `json:"totalTxPkts"`
-	TotalRxPkts  int64     `json:"totalRxPkts"`
-	FlowCount    int64     `json:"flowCount"`
-	FirstSeen    time.Time `json:"firstSeen"`
-	LastSeen     time.Time `json:"lastSeen"`
+// FlowLog represents a raw flow log entry (kept temporarily for current period)
+type FlowLog struct {
+	ID          int64     `json:"id"`
+	LoggedAt    time.Time `json:"loggedAt"`
+	NodeID      string    `json:"nodeId"`
+	TrafficType string    `json:"trafficType"`
+	Protocol    int       `json:"protocol"`
+	SrcIP       string    `json:"srcIp"`
+	SrcPort     int       `json:"srcPort"`
+	DstIP       string    `json:"dstIp"`
+	DstPort     int       `json:"dstPort"`
+	TxBytes     int64     `json:"txBytes"`
+	RxBytes     int64     `json:"rxBytes"`
+	TxPkts      int64     `json:"txPkts"`
+	RxPkts      int64     `json:"rxPkts"`
 }
 
 // Store defines the interface for flow log storage
-// This abstraction allows easy migration to PostgreSQL later
 type Store interface {
-	// Initialize the database schema
 	Init(ctx context.Context) error
-
-	// Close the database connection
 	Close() error
 
-	// InsertFlowLogs inserts multiple flow logs in a batch
-	// Returns the logs that were actually inserted (excludes duplicates)
-	InsertFlowLogs(ctx context.Context, logs []FlowLog) ([]FlowLog, error)
+	// Raw log operations (for current incomplete period only)
+	InsertFlowLogs(ctx context.Context, logs []FlowLog) (int, error)
+	GetRecentFlowLogs(ctx context.Context, since time.Time) ([]FlowLog, error)
 
-	// GetFlowLogs retrieves flow logs within a time range
-	GetFlowLogs(ctx context.Context, start, end time.Time, limit int) ([]FlowLog, error)
+	// Pre-aggregated data operations
+	UpsertNodePairAggregates(ctx context.Context, aggregates []NodePairAggregate) error
+	GetNodePairAggregates(ctx context.Context, start, end time.Time, bucketSize int64) ([]NodePairAggregate, error)
 
-	// GetDataRange returns the available data time range
+	// Bandwidth operations
+	UpsertBandwidth(ctx context.Context, buckets []BandwidthBucket, bucketSize int64) error
+	UpsertNodeBandwidth(ctx context.Context, buckets []NodeBandwidth, bucketSize int64) error
+	GetBandwidth(ctx context.Context, start, end time.Time) ([]BandwidthBucket, error)
+	GetNodeBandwidth(ctx context.Context, start, end time.Time, nodeID string) ([]BandwidthBucket, error)
+
+	// State operations
+	GetPollState(ctx context.Context) (*PollState, error)
+	UpdatePollState(ctx context.Context, lastPollEnd time.Time) error
 	GetDataRange(ctx context.Context) (*DataRange, error)
 
-	// GetPollState retrieves the current poll state
-	GetPollState(ctx context.Context) (*PollState, error)
-
-	// UpdatePollState updates the poll state
-	UpdatePollState(ctx context.Context, lastPollEnd time.Time) error
-
-	// CleanupOldLogs removes logs older than the retention period
-	CleanupOldLogs(ctx context.Context, retention time.Duration) (int64, error)
-
-	// CleanupOldRollups removes old rollup data (minutely: 24h, hourly: 30d)
-	CleanupOldRollups(ctx context.Context) (int64, error)
-
-	// GetStats returns database statistics
+	// Maintenance
+	Cleanup(ctx context.Context, retentionMinutely, retentionHourly, retentionDaily time.Duration) (int64, error)
 	GetStats(ctx context.Context) (map[string]interface{}, error)
-
-	// GetBandwidthAggregated returns aggregated bandwidth data in time buckets
-	GetBandwidthAggregated(ctx context.Context, start, end time.Time, bucketSeconds int) ([]BandwidthBucket, error)
-
-	// GetBandwidthByIPs returns bandwidth aggregated by time bucket filtered by node IPs
-	GetBandwidthByIPs(ctx context.Context, start, end time.Time, ips []string) ([]BandwidthBucket, error)
-
-	// GetAggregatedFlows returns node-to-node traffic aggregated by src/dst IP pairs
-	// This is the scalable alternative to GetFlowLogs for large datasets
-	GetAggregatedFlows(ctx context.Context, start, end time.Time) ([]AggregatedFlow, error)
-
-	// UpdateBandwidthRollups updates the pre-aggregated bandwidth rollup tables
-	UpdateBandwidthRollups(ctx context.Context, logs []FlowLog) error
-
-	// BackfillBandwidthRollups rebuilds rollups from existing flow_logs
-	BackfillBandwidthRollups(ctx context.Context) error
 }
 
-// SQLiteStore implements Store using SQLite with WAL mode
+// SQLiteStore implements Store using SQLite
 type SQLiteStore struct {
 	db     *sql.DB
 	dbPath string
 	mu     sync.RWMutex
 }
 
-// parseTime parses a time string from SQLite in various formats
-func parseTime(s string) time.Time {
-	formats := []string{
-		"2006-01-02 15:04:05.999999999 -0700 MST", // Go's default time.Time.String() format
-		"2006-01-02 15:04:05.999999999 +0000 UTC", // Common UTC format
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02 15:04:05.999999999-07:00",
-		"2006-01-02T15:04:05.999999999-07:00",
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05",
-	}
-	for _, format := range formats {
-		if t, err := time.Parse(format, s); err == nil {
-			return t
-		}
-	}
-	return time.Time{}
-}
-
 // NewSQLiteStore creates a new SQLite store
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
-	// Open with WAL mode and busy timeout for concurrent access
 	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=10000", dbPath)
 
 	db, err := sql.Open("sqlite", dsn)
@@ -158,29 +116,22 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Configure connection pool for concurrent reads
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(time.Hour)
 
-	store := &SQLiteStore{
-		db:     db,
-		dbPath: dbPath,
-	}
-
-	return store, nil
+	return &SQLiteStore{db: db, dbPath: dbPath}, nil
 }
 
 // Init creates the database schema
 func (s *SQLiteStore) Init(ctx context.Context) error {
 	schema := `
-	-- Flow logs table with optimized schema for time-series queries
-	CREATE TABLE IF NOT EXISTS flow_logs (
+	-- Temporary raw flow logs (kept for current poll period only, ~10 minutes)
+	-- Used for real-time queries before aggregation
+	CREATE TABLE IF NOT EXISTS flow_logs_current (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		logged_at DATETIME NOT NULL,
 		node_id TEXT NOT NULL,
-		period_start DATETIME NOT NULL,
-		period_end DATETIME NOT NULL,
 		traffic_type TEXT NOT NULL,
 		protocol INTEGER DEFAULT 0,
 		src_ip TEXT NOT NULL,
@@ -190,61 +141,115 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 		tx_bytes INTEGER DEFAULT 0,
 		rx_bytes INTEGER DEFAULT 0,
 		tx_pkts INTEGER DEFAULT 0,
+		rx_pkts INTEGER DEFAULT 0
+	);
+	CREATE INDEX IF NOT EXISTS idx_flow_logs_current_logged ON flow_logs_current(logged_at);
+
+	-- Node-pair aggregates: the primary data for graph rendering
+	-- Pre-computed at poll time with IP->device resolution
+	-- Tiered: minutely (24h), hourly (7d), daily (forever)
+	CREATE TABLE IF NOT EXISTS node_pairs_minutely (
+		bucket INTEGER NOT NULL,
+		src_node_id TEXT NOT NULL,
+		dst_node_id TEXT NOT NULL,
+		traffic_type TEXT NOT NULL,
+		tx_bytes INTEGER DEFAULT 0,
+		rx_bytes INTEGER DEFAULT 0,
+		tx_pkts INTEGER DEFAULT 0,
 		rx_pkts INTEGER DEFAULT 0,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		flow_count INTEGER DEFAULT 0,
+		protocols TEXT DEFAULT '[]',
+		ports TEXT DEFAULT '[]',
+		PRIMARY KEY (bucket, src_node_id, dst_node_id, traffic_type)
+	);
+	CREATE INDEX IF NOT EXISTS idx_node_pairs_minutely_bucket ON node_pairs_minutely(bucket);
+
+	CREATE TABLE IF NOT EXISTS node_pairs_hourly (
+		bucket INTEGER NOT NULL,
+		src_node_id TEXT NOT NULL,
+		dst_node_id TEXT NOT NULL,
+		traffic_type TEXT NOT NULL,
+		tx_bytes INTEGER DEFAULT 0,
+		rx_bytes INTEGER DEFAULT 0,
+		tx_pkts INTEGER DEFAULT 0,
+		rx_pkts INTEGER DEFAULT 0,
+		flow_count INTEGER DEFAULT 0,
+		protocols TEXT DEFAULT '[]',
+		ports TEXT DEFAULT '[]',
+		PRIMARY KEY (bucket, src_node_id, dst_node_id, traffic_type)
+	);
+	CREATE INDEX IF NOT EXISTS idx_node_pairs_hourly_bucket ON node_pairs_hourly(bucket);
+
+	CREATE TABLE IF NOT EXISTS node_pairs_daily (
+		bucket INTEGER NOT NULL,
+		src_node_id TEXT NOT NULL,
+		dst_node_id TEXT NOT NULL,
+		traffic_type TEXT NOT NULL,
+		tx_bytes INTEGER DEFAULT 0,
+		rx_bytes INTEGER DEFAULT 0,
+		tx_pkts INTEGER DEFAULT 0,
+		rx_pkts INTEGER DEFAULT 0,
+		flow_count INTEGER DEFAULT 0,
+		protocols TEXT DEFAULT '[]',
+		ports TEXT DEFAULT '[]',
+		PRIMARY KEY (bucket, src_node_id, dst_node_id, traffic_type)
+	);
+	CREATE INDEX IF NOT EXISTS idx_node_pairs_daily_bucket ON node_pairs_daily(bucket);
+
+	-- Total bandwidth rollups (for bandwidth chart without node filter)
+	CREATE TABLE IF NOT EXISTS bandwidth_minutely (
+		bucket INTEGER PRIMARY KEY,
+		tx_bytes INTEGER DEFAULT 0,
+		rx_bytes INTEGER DEFAULT 0
 	);
 
-	-- Unique constraint to prevent duplicate log entries (deduplication)
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_flow_logs_unique ON flow_logs(
-		logged_at, node_id, traffic_type, protocol, src_ip, src_port, dst_ip, dst_port
+	CREATE TABLE IF NOT EXISTS bandwidth_hourly (
+		bucket INTEGER PRIMARY KEY,
+		tx_bytes INTEGER DEFAULT 0,
+		rx_bytes INTEGER DEFAULT 0
 	);
 
-	-- Indexes for common query patterns
-	CREATE INDEX IF NOT EXISTS idx_flow_logs_logged_at ON flow_logs(logged_at);
-	CREATE INDEX IF NOT EXISTS idx_flow_logs_node_id ON flow_logs(node_id);
-	CREATE INDEX IF NOT EXISTS idx_flow_logs_traffic_type ON flow_logs(traffic_type);
-	CREATE INDEX IF NOT EXISTS idx_flow_logs_src_ip ON flow_logs(src_ip);
-	CREATE INDEX IF NOT EXISTS idx_flow_logs_dst_ip ON flow_logs(dst_ip);
-	CREATE INDEX IF NOT EXISTS idx_flow_logs_logged_at_type ON flow_logs(logged_at, traffic_type);
+	CREATE TABLE IF NOT EXISTS bandwidth_daily (
+		bucket INTEGER PRIMARY KEY,
+		tx_bytes INTEGER DEFAULT 0,
+		rx_bytes INTEGER DEFAULT 0
+	);
 
-	-- Covering index for bandwidth aggregation (query can be answered entirely from index)
-	CREATE INDEX IF NOT EXISTS idx_flow_logs_bandwidth ON flow_logs(logged_at, traffic_type, tx_bytes, rx_bytes);
+	-- Per-node bandwidth rollups (for bandwidth chart with node filter)
+	CREATE TABLE IF NOT EXISTS bandwidth_by_node_minutely (
+		bucket INTEGER NOT NULL,
+		node_id TEXT NOT NULL,
+		tx_bytes INTEGER DEFAULT 0,
+		rx_bytes INTEGER DEFAULT 0,
+		PRIMARY KEY (bucket, node_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_bandwidth_node_minutely_node ON bandwidth_by_node_minutely(node_id, bucket);
 
-	-- Composite index for efficient aggregation queries (GROUP BY node_id, traffic_type, src_ip, dst_ip)
-	CREATE INDEX IF NOT EXISTS idx_flow_logs_aggregation ON flow_logs(logged_at, node_id, traffic_type, src_ip, dst_ip);
+	CREATE TABLE IF NOT EXISTS bandwidth_by_node_hourly (
+		bucket INTEGER NOT NULL,
+		node_id TEXT NOT NULL,
+		tx_bytes INTEGER DEFAULT 0,
+		rx_bytes INTEGER DEFAULT 0,
+		PRIMARY KEY (bucket, node_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_bandwidth_node_hourly_node ON bandwidth_by_node_hourly(node_id, bucket);
 
-	-- Poll state tracking (single row table)
+	CREATE TABLE IF NOT EXISTS bandwidth_by_node_daily (
+		bucket INTEGER NOT NULL,
+		node_id TEXT NOT NULL,
+		tx_bytes INTEGER DEFAULT 0,
+		rx_bytes INTEGER DEFAULT 0,
+		PRIMARY KEY (bucket, node_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_bandwidth_node_daily_node ON bandwidth_by_node_daily(node_id, bucket);
+
+	-- Poll state tracking
 	CREATE TABLE IF NOT EXISTS poll_state (
 		id INTEGER PRIMARY KEY CHECK (id = 1),
 		last_poll_end DATETIME,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
-
-	-- Initialize poll state if not exists
-	INSERT OR IGNORE INTO poll_state (id, last_poll_end, updated_at)
-	VALUES (1, NULL, CURRENT_TIMESTAMP);
-
-	-- Bandwidth rollup tables for O(1) historical queries
-	-- Minutely: 1-minute buckets, for last 24 hours of detail
-	CREATE TABLE IF NOT EXISTS bandwidth_minutely (
-		bucket INTEGER PRIMARY KEY,  -- Unix timestamp truncated to minute
-		tx_bytes INTEGER DEFAULT 0,
-		rx_bytes INTEGER DEFAULT 0
-	);
-
-	-- Hourly: 1-hour buckets, for last 30 days
-	CREATE TABLE IF NOT EXISTS bandwidth_hourly (
-		bucket INTEGER PRIMARY KEY,  -- Unix timestamp truncated to hour
-		tx_bytes INTEGER DEFAULT 0,
-		rx_bytes INTEGER DEFAULT 0
-	);
-
-	-- Daily: 1-day buckets, kept indefinitely
-	CREATE TABLE IF NOT EXISTS bandwidth_daily (
-		bucket INTEGER PRIMARY KEY,  -- Unix timestamp truncated to day (UTC midnight)
-		tx_bytes INTEGER DEFAULT 0,
-		rx_bytes INTEGER DEFAULT 0
-	);
+	INSERT OR IGNORE INTO poll_state (id, last_poll_end, updated_at) VALUES (1, NULL, CURRENT_TIMESTAMP);
 	`
 
 	_, err := s.db.ExecContext(ctx, schema)
@@ -253,20 +258,6 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 	}
 
 	log.Printf("Database initialized at %s", s.dbPath)
-
-	// Auto-backfill rollups if empty but flow_logs has data
-	var rollupCount, logCount int64
-	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM bandwidth_minutely").Scan(&rollupCount)
-	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM flow_logs").Scan(&logCount)
-
-	if rollupCount == 0 && logCount > 0 {
-		log.Printf("Rollup tables empty but %d flow logs exist, starting backfill...", logCount)
-		// Release lock for backfill (Init doesn't hold the lock)
-		if err := s.BackfillBandwidthRollups(ctx); err != nil {
-			log.Printf("Warning: backfill failed: %v", err)
-		}
-	}
-
 	return nil
 }
 
@@ -275,11 +266,10 @@ func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
-// InsertFlowLogs inserts multiple flow logs in a batch transaction
-// Returns the logs that were actually inserted (excludes duplicates)
-func (s *SQLiteStore) InsertFlowLogs(ctx context.Context, logs []FlowLog) ([]FlowLog, error) {
+// InsertFlowLogs inserts raw flow logs for the current period
+func (s *SQLiteStore) InsertFlowLogs(ctx context.Context, logs []FlowLog) (int, error) {
 	if len(logs) == 0 {
-		return nil, nil
+		return 0, nil
 	}
 
 	s.mu.Lock()
@@ -287,64 +277,56 @@ func (s *SQLiteStore) InsertFlowLogs(ctx context.Context, logs []FlowLog) ([]Flo
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Use INSERT OR IGNORE to skip duplicates (based on unique index)
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT OR IGNORE INTO flow_logs (
-			logged_at, node_id, period_start, period_end, traffic_type,
-			protocol, src_ip, src_port, dst_ip, dst_port,
+		INSERT INTO flow_logs_current (
+			logged_at, node_id, traffic_type, protocol,
+			src_ip, src_port, dst_ip, dst_port,
 			tx_bytes, rx_bytes, tx_pkts, rx_pkts
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare statement: %w", err)
+		return 0, fmt.Errorf("failed to prepare statement: %w", err)
 	}
 	defer stmt.Close()
 
-	var inserted []FlowLog
+	count := 0
 	for _, log := range logs {
-		result, err := stmt.ExecContext(ctx,
-			log.LoggedAt, log.NodeID, log.PeriodStart, log.PeriodEnd, log.TrafficType,
-			log.Protocol, log.SrcIP, log.SrcPort, log.DstIP, log.DstPort,
+		_, err := stmt.ExecContext(ctx,
+			log.LoggedAt, log.NodeID, log.TrafficType, log.Protocol,
+			log.SrcIP, log.SrcPort, log.DstIP, log.DstPort,
 			log.TxBytes, log.RxBytes, log.TxPkts, log.RxPkts,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to insert log: %w", err)
+			return count, fmt.Errorf("failed to insert log: %w", err)
 		}
-		// Check if row was actually inserted (not ignored due to duplicate)
-		if rowsAffected, _ := result.RowsAffected(); rowsAffected > 0 {
-			inserted = append(inserted, log)
-		}
+		count++
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	return inserted, nil
+	return count, nil
 }
 
-// GetFlowLogs retrieves flow logs within a time range
-func (s *SQLiteStore) GetFlowLogs(ctx context.Context, start, end time.Time, limit int) ([]FlowLog, error) {
+// GetRecentFlowLogs retrieves raw flow logs since a given time
+func (s *SQLiteStore) GetRecentFlowLogs(ctx context.Context, since time.Time) ([]FlowLog, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `
-		SELECT id, logged_at, node_id, period_start, period_end, traffic_type,
-			   protocol, src_ip, src_port, dst_ip, dst_port,
-			   tx_bytes, rx_bytes, tx_pkts, rx_pkts, created_at
-		FROM flow_logs
-		WHERE logged_at >= ? AND logged_at <= ?
-		ORDER BY logged_at ASC
-		LIMIT ?
-	`
-
-	// Use the same format that SQLite stores time.Time values
 	const sqliteFormat = "2006-01-02 15:04:05"
-	rows, err := s.db.QueryContext(ctx, query, start.UTC().Format(sqliteFormat), end.UTC().Format(sqliteFormat), limit)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, logged_at, node_id, traffic_type, protocol,
+			   src_ip, src_port, dst_ip, dst_port,
+			   tx_bytes, rx_bytes, tx_pkts, rx_pkts
+		FROM flow_logs_current
+		WHERE logged_at >= ?
+		ORDER BY logged_at ASC
+	`, since.UTC().Format(sqliteFormat))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query logs: %w", err)
 	}
@@ -353,105 +335,305 @@ func (s *SQLiteStore) GetFlowLogs(ctx context.Context, start, end time.Time, lim
 	var logs []FlowLog
 	for rows.Next() {
 		var log FlowLog
-		var loggedAt, periodStart, periodEnd, createdAt string
+		var loggedAt string
 		err := rows.Scan(
-			&log.ID, &loggedAt, &log.NodeID, &periodStart, &periodEnd, &log.TrafficType,
-			&log.Protocol, &log.SrcIP, &log.SrcPort, &log.DstIP, &log.DstPort,
-			&log.TxBytes, &log.RxBytes, &log.TxPkts, &log.RxPkts, &createdAt,
+			&log.ID, &loggedAt, &log.NodeID, &log.TrafficType, &log.Protocol,
+			&log.SrcIP, &log.SrcPort, &log.DstIP, &log.DstPort,
+			&log.TxBytes, &log.RxBytes, &log.TxPkts, &log.RxPkts,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan log: %w", err)
 		}
 		log.LoggedAt = parseTime(loggedAt)
-		log.PeriodStart = parseTime(periodStart)
-		log.PeriodEnd = parseTime(periodEnd)
-		log.CreatedAt = parseTime(createdAt)
 		logs = append(logs, log)
 	}
 
 	return logs, rows.Err()
 }
 
-// GetAggregatedFlows returns node-to-node traffic aggregated by src/dst IP pairs and ports
-// This dramatically reduces data volume for large networks by grouping flows
-func (s *SQLiteStore) GetAggregatedFlows(ctx context.Context, start, end time.Time) ([]AggregatedFlow, error) {
+// UpsertNodePairAggregates upserts node-pair aggregates into appropriate tier tables
+func (s *SQLiteStore) UpsertNodePairAggregates(ctx context.Context, aggregates []NodePairAggregate) error {
+	if len(aggregates) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Prepare statements for each tier
+	tables := []string{"node_pairs_minutely", "node_pairs_hourly", "node_pairs_daily"}
+	bucketSizes := []int64{60, 3600, 86400}
+
+	for i, table := range tables {
+		bucketSize := bucketSizes[i]
+		stmt, err := tx.PrepareContext(ctx, fmt.Sprintf(`
+			INSERT INTO %s (bucket, src_node_id, dst_node_id, traffic_type, tx_bytes, rx_bytes, tx_pkts, rx_pkts, flow_count, protocols, ports)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(bucket, src_node_id, dst_node_id, traffic_type) DO UPDATE SET
+				tx_bytes = tx_bytes + excluded.tx_bytes,
+				rx_bytes = rx_bytes + excluded.rx_bytes,
+				tx_pkts = tx_pkts + excluded.tx_pkts,
+				rx_pkts = rx_pkts + excluded.rx_pkts,
+				flow_count = flow_count + excluded.flow_count
+		`, table))
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement for %s: %w", table, err)
+		}
+		defer stmt.Close()
+
+		for _, agg := range aggregates {
+			bucket := (agg.Bucket / bucketSize) * bucketSize
+			_, err := stmt.ExecContext(ctx,
+				bucket, agg.SrcNodeID, agg.DstNodeID, agg.TrafficType,
+				agg.TxBytes, agg.RxBytes, agg.TxPkts, agg.RxPkts,
+				agg.FlowCount, agg.Protocols, agg.Ports,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to upsert aggregate: %w", err)
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetNodePairAggregates retrieves node-pair aggregates for a time range
+func (s *SQLiteStore) GetNodePairAggregates(ctx context.Context, start, end time.Time, bucketSize int64) ([]NodePairAggregate, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `
-		SELECT
-			node_id,
-			traffic_type,
-			MAX(protocol) as protocol,
-			src_ip,
-			0 as src_port,
-			dst_ip,
-			dst_port,
-			SUM(tx_bytes) as total_tx_bytes,
-			SUM(rx_bytes) as total_rx_bytes,
-			SUM(tx_pkts) as total_tx_pkts,
-			SUM(rx_pkts) as total_rx_pkts,
-			COUNT(*) as flow_count,
-			MIN(logged_at) as first_seen,
-			MAX(logged_at) as last_seen
-		FROM flow_logs
-		WHERE logged_at >= ? AND logged_at <= ?
-		GROUP BY node_id, traffic_type, src_ip, dst_ip, dst_port
-		ORDER BY total_tx_bytes + total_rx_bytes DESC
-	`
+	startUnix := start.UTC().Unix()
+	endUnix := end.UTC().Unix()
+	rangeSeconds := endUnix - startUnix
 
-	const sqliteFormat = "2006-01-02 15:04:05"
-	rows, err := s.db.QueryContext(ctx, query, start.UTC().Format(sqliteFormat), end.UTC().Format(sqliteFormat))
+	// Choose table based on range
+	var table string
+	switch {
+	case rangeSeconds <= 24*3600:
+		table = "node_pairs_minutely"
+	case rangeSeconds <= 7*24*3600:
+		table = "node_pairs_hourly"
+	default:
+		table = "node_pairs_daily"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT bucket, src_node_id, dst_node_id, traffic_type,
+			   SUM(tx_bytes), SUM(rx_bytes), SUM(tx_pkts), SUM(rx_pkts),
+			   SUM(flow_count), protocols, ports
+		FROM %s
+		WHERE bucket >= ? AND bucket <= ?
+		GROUP BY src_node_id, dst_node_id, traffic_type
+		ORDER BY SUM(tx_bytes) + SUM(rx_bytes) DESC
+	`, table)
+
+	rows, err := s.db.QueryContext(ctx, query, startUnix, endUnix)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query aggregated flows: %w", err)
+		return nil, fmt.Errorf("failed to query aggregates: %w", err)
 	}
 	defer rows.Close()
 
-	var flows []AggregatedFlow
+	var aggregates []NodePairAggregate
 	for rows.Next() {
-		var flow AggregatedFlow
-		var firstSeen, lastSeen string
+		var agg NodePairAggregate
 		err := rows.Scan(
-			&flow.NodeID, &flow.TrafficType, &flow.Protocol,
-			&flow.SrcIP, &flow.SrcPort, &flow.DstIP, &flow.DstPort,
-			&flow.TotalTxBytes, &flow.TotalRxBytes, &flow.TotalTxPkts, &flow.TotalRxPkts,
-			&flow.FlowCount, &firstSeen, &lastSeen,
+			&agg.Bucket, &agg.SrcNodeID, &agg.DstNodeID, &agg.TrafficType,
+			&agg.TxBytes, &agg.RxBytes, &agg.TxPkts, &agg.RxPkts,
+			&agg.FlowCount, &agg.Protocols, &agg.Ports,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan aggregated flow: %w", err)
+			return nil, fmt.Errorf("failed to scan aggregate: %w", err)
 		}
-		flow.FirstSeen = parseTime(firstSeen)
-		flow.LastSeen = parseTime(lastSeen)
-		flows = append(flows, flow)
+		aggregates = append(aggregates, agg)
 	}
 
-	return flows, rows.Err()
+	return aggregates, rows.Err()
 }
 
-// GetDataRange returns the available data time range
-func (s *SQLiteStore) GetDataRange(ctx context.Context) (*DataRange, error) {
+// UpsertBandwidth upserts total bandwidth into appropriate tier tables
+func (s *SQLiteStore) UpsertBandwidth(ctx context.Context, buckets []BandwidthBucket, bucketSize int64) error {
+	if len(buckets) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	tables := []string{"bandwidth_minutely", "bandwidth_hourly", "bandwidth_daily"}
+	bucketSizes := []int64{60, 3600, 86400}
+
+	for i, table := range tables {
+		bs := bucketSizes[i]
+		stmt, err := tx.PrepareContext(ctx, fmt.Sprintf(`
+			INSERT INTO %s (bucket, tx_bytes, rx_bytes) VALUES (?, ?, ?)
+			ON CONFLICT(bucket) DO UPDATE SET
+				tx_bytes = tx_bytes + excluded.tx_bytes,
+				rx_bytes = rx_bytes + excluded.rx_bytes
+		`, table))
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement for %s: %w", table, err)
+		}
+		defer stmt.Close()
+
+		for _, b := range buckets {
+			bucket := (b.Time.UTC().Unix() / bs) * bs
+			_, err := stmt.ExecContext(ctx, bucket, b.TxBytes, b.RxBytes)
+			if err != nil {
+				return fmt.Errorf("failed to upsert bandwidth: %w", err)
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
+// UpsertNodeBandwidth upserts per-node bandwidth into appropriate tier tables
+func (s *SQLiteStore) UpsertNodeBandwidth(ctx context.Context, buckets []NodeBandwidth, bucketSize int64) error {
+	if len(buckets) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	tables := []string{"bandwidth_by_node_minutely", "bandwidth_by_node_hourly", "bandwidth_by_node_daily"}
+	bucketSizes := []int64{60, 3600, 86400}
+
+	for i, table := range tables {
+		bs := bucketSizes[i]
+		stmt, err := tx.PrepareContext(ctx, fmt.Sprintf(`
+			INSERT INTO %s (bucket, node_id, tx_bytes, rx_bytes) VALUES (?, ?, ?, ?)
+			ON CONFLICT(bucket, node_id) DO UPDATE SET
+				tx_bytes = tx_bytes + excluded.tx_bytes,
+				rx_bytes = rx_bytes + excluded.rx_bytes
+		`, table))
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement for %s: %w", table, err)
+		}
+		defer stmt.Close()
+
+		for _, b := range buckets {
+			bucket := (b.Bucket / bs) * bs
+			_, err := stmt.ExecContext(ctx, bucket, b.NodeID, b.TxBytes, b.RxBytes)
+			if err != nil {
+				return fmt.Errorf("failed to upsert node bandwidth: %w", err)
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetBandwidth retrieves total bandwidth for a time range
+func (s *SQLiteStore) GetBandwidth(ctx context.Context, start, end time.Time) ([]BandwidthBucket, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var dataRange DataRange
-	var earliest, latest sql.NullString
+	startUnix := start.UTC().Unix()
+	endUnix := end.UTC().Unix()
+	rangeSeconds := endUnix - startUnix
 
-	err := s.db.QueryRowContext(ctx, `
-		SELECT MIN(logged_at), MAX(logged_at), COUNT(*)
-		FROM flow_logs
-	`).Scan(&earliest, &latest, &dataRange.Count)
+	var table string
+	switch {
+	case rangeSeconds <= 24*3600:
+		table = "bandwidth_minutely"
+	case rangeSeconds <= 7*24*3600:
+		table = "bandwidth_hourly"
+	default:
+		table = "bandwidth_daily"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT bucket, tx_bytes, rx_bytes
+		FROM %s
+		WHERE bucket >= ? AND bucket <= ?
+		ORDER BY bucket ASC
+	`, table)
+
+	rows, err := s.db.QueryContext(ctx, query, startUnix, endUnix)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get data range: %w", err)
+		return nil, fmt.Errorf("failed to query bandwidth: %w", err)
+	}
+	defer rows.Close()
+
+	var buckets []BandwidthBucket
+	for rows.Next() {
+		var bucket int64
+		var b BandwidthBucket
+		err := rows.Scan(&bucket, &b.TxBytes, &b.RxBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan bucket: %w", err)
+		}
+		b.Time = time.Unix(bucket, 0).UTC()
+		buckets = append(buckets, b)
 	}
 
-	if earliest.Valid && earliest.String != "" {
-		dataRange.Earliest = parseTime(earliest.String)
-	}
-	if latest.Valid && latest.String != "" {
-		dataRange.Latest = parseTime(latest.String)
+	return buckets, rows.Err()
+}
+
+// GetNodeBandwidth retrieves bandwidth for a specific node
+func (s *SQLiteStore) GetNodeBandwidth(ctx context.Context, start, end time.Time, nodeID string) ([]BandwidthBucket, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	startUnix := start.UTC().Unix()
+	endUnix := end.UTC().Unix()
+	rangeSeconds := endUnix - startUnix
+
+	var table string
+	switch {
+	case rangeSeconds <= 24*3600:
+		table = "bandwidth_by_node_minutely"
+	case rangeSeconds <= 7*24*3600:
+		table = "bandwidth_by_node_hourly"
+	default:
+		table = "bandwidth_by_node_daily"
 	}
 
-	return &dataRange, nil
+	query := fmt.Sprintf(`
+		SELECT bucket, tx_bytes, rx_bytes
+		FROM %s
+		WHERE bucket >= ? AND bucket <= ? AND node_id = ?
+		ORDER BY bucket ASC
+	`, table)
+
+	rows, err := s.db.QueryContext(ctx, query, startUnix, endUnix, nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query node bandwidth: %w", err)
+	}
+	defer rows.Close()
+
+	var buckets []BandwidthBucket
+	for rows.Next() {
+		var bucket int64
+		var b BandwidthBucket
+		err := rows.Scan(&bucket, &b.TxBytes, &b.RxBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan bucket: %w", err)
+		}
+		b.Time = time.Unix(bucket, 0).UTC()
+		buckets = append(buckets, b)
+	}
+
+	return buckets, rows.Err()
 }
 
 // GetPollState retrieves the current poll state
@@ -494,56 +676,89 @@ func (s *SQLiteStore) UpdatePollState(ctx context.Context, lastPollEnd time.Time
 	return nil
 }
 
-// CleanupOldLogs removes logs older than the retention period
-func (s *SQLiteStore) CleanupOldLogs(ctx context.Context, retention time.Duration) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// GetDataRange returns the available data time range
+func (s *SQLiteStore) GetDataRange(ctx context.Context) (*DataRange, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	cutoff := time.Now().Add(-retention)
+	var dataRange DataRange
 
-	result, err := s.db.ExecContext(ctx, `
-		DELETE FROM flow_logs WHERE logged_at < ?
-	`, cutoff)
+	// Get range from node_pairs_minutely (most granular pre-aggregated data)
+	var minBucket, maxBucket sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT MIN(bucket), MAX(bucket) FROM node_pairs_minutely
+	`).Scan(&minBucket, &maxBucket)
 	if err != nil {
-		return 0, fmt.Errorf("failed to cleanup old logs: %w", err)
+		return nil, fmt.Errorf("failed to get data range: %w", err)
 	}
 
-	deleted, _ := result.RowsAffected()
-	return deleted, nil
+	if minBucket.Valid {
+		dataRange.Earliest = time.Unix(minBucket.Int64, 0).UTC()
+	}
+	if maxBucket.Valid {
+		dataRange.Latest = time.Unix(maxBucket.Int64, 0).UTC()
+	}
+
+	return &dataRange, nil
 }
 
-// CleanupOldRollups removes old rollup data to prevent unbounded growth
-// - Minutely: keep 24 hours (for detailed recent queries)
-// - Hourly: keep 30 days (for medium-term queries)
-// - Daily: kept indefinitely (for long-term trends)
-func (s *SQLiteStore) CleanupOldRollups(ctx context.Context) (int64, error) {
+// Cleanup removes old data based on retention periods
+func (s *SQLiteStore) Cleanup(ctx context.Context, retentionMinutely, retentionHourly, retentionDaily time.Duration) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := time.Now().UTC().Unix()
 	var totalDeleted int64
 
-	// Delete minutely buckets older than 24 hours
-	minutelyCutoff := now - 24*3600
-	result, err := s.db.ExecContext(ctx, "DELETE FROM bandwidth_minutely WHERE bucket < ?", minutelyCutoff)
-	if err != nil {
-		return 0, fmt.Errorf("failed to cleanup minutely rollups: %w", err)
-	}
-	if deleted, _ := result.RowsAffected(); deleted > 0 {
-		totalDeleted += deleted
-	}
-
-	// Delete hourly buckets older than 30 days
-	hourlyCutoff := now - 30*24*3600
-	result, err = s.db.ExecContext(ctx, "DELETE FROM bandwidth_hourly WHERE bucket < ?", hourlyCutoff)
-	if err != nil {
-		return totalDeleted, fmt.Errorf("failed to cleanup hourly rollups: %w", err)
-	}
-	if deleted, _ := result.RowsAffected(); deleted > 0 {
-		totalDeleted += deleted
+	// Clean up minutely tables
+	minutelyCutoff := now - int64(retentionMinutely.Seconds())
+	for _, table := range []string{"node_pairs_minutely", "bandwidth_minutely", "bandwidth_by_node_minutely"} {
+		result, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE bucket < ?", table), minutelyCutoff)
+		if err != nil {
+			log.Printf("Warning: failed to cleanup %s: %v", table, err)
+			continue
+		}
+		if deleted, _ := result.RowsAffected(); deleted > 0 {
+			totalDeleted += deleted
+		}
 	}
 
-	// Daily is kept indefinitely
+	// Clean up hourly tables
+	hourlyCutoff := now - int64(retentionHourly.Seconds())
+	for _, table := range []string{"node_pairs_hourly", "bandwidth_hourly", "bandwidth_by_node_hourly"} {
+		result, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE bucket < ?", table), hourlyCutoff)
+		if err != nil {
+			log.Printf("Warning: failed to cleanup %s: %v", table, err)
+			continue
+		}
+		if deleted, _ := result.RowsAffected(); deleted > 0 {
+			totalDeleted += deleted
+		}
+	}
+
+	// Clean up daily tables (if retention specified)
+	if retentionDaily > 0 {
+		dailyCutoff := now - int64(retentionDaily.Seconds())
+		for _, table := range []string{"node_pairs_daily", "bandwidth_daily", "bandwidth_by_node_daily"} {
+			result, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE bucket < ?", table), dailyCutoff)
+			if err != nil {
+				log.Printf("Warning: failed to cleanup %s: %v", table, err)
+				continue
+			}
+			if deleted, _ := result.RowsAffected(); deleted > 0 {
+				totalDeleted += deleted
+			}
+		}
+	}
+
+	// Clean up raw flow logs (keep only last 10 minutes)
+	flowLogCutoff := time.Now().Add(-10 * time.Minute)
+	result, err := s.db.ExecContext(ctx, "DELETE FROM flow_logs_current WHERE logged_at < ?", flowLogCutoff)
+	if err != nil {
+		log.Printf("Warning: failed to cleanup flow_logs_current: %v", err)
+	} else if deleted, _ := result.RowsAffected(); deleted > 0 {
+		totalDeleted += deleted
+	}
 
 	return totalDeleted, nil
 }
@@ -555,342 +770,51 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (map[string]interface{}, err
 
 	stats := make(map[string]interface{})
 
-	// Total logs
-	var totalLogs int64
-	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM flow_logs").Scan(&totalLogs)
-	stats["totalLogs"] = totalLogs
-
-	// Logs by traffic type
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT traffic_type, COUNT(*) FROM flow_logs GROUP BY traffic_type
-	`)
-	if err == nil {
-		defer rows.Close()
-		byType := make(map[string]int64)
-		for rows.Next() {
-			var trafficType string
-			var count int64
-			rows.Scan(&trafficType, &count)
-			byType[trafficType] = count
-		}
-		stats["byTrafficType"] = byType
+	// Count records in each table
+	tables := []string{
+		"flow_logs_current",
+		"node_pairs_minutely", "node_pairs_hourly", "node_pairs_daily",
+		"bandwidth_minutely", "bandwidth_hourly", "bandwidth_daily",
+		"bandwidth_by_node_minutely", "bandwidth_by_node_hourly", "bandwidth_by_node_daily",
 	}
 
-	// Database size (approximate)
+	tableCounts := make(map[string]int64)
+	for _, table := range tables {
+		var count int64
+		s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count)
+		tableCounts[table] = count
+	}
+	stats["tableCounts"] = tableCounts
+
+	// Database size
 	var pageCount, pageSize int64
 	s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount)
 	s.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize)
 	stats["dbSizeBytes"] = pageCount * pageSize
 
-	// Data range (inline to avoid recursive lock)
-	var earliest, latest sql.NullString
-	var count int64
-	err = s.db.QueryRowContext(ctx, `
-		SELECT MIN(logged_at), MAX(logged_at), COUNT(*) FROM flow_logs
-	`).Scan(&earliest, &latest, &count)
-	if err == nil {
-		dataRange := &DataRange{Count: count}
-		if earliest.Valid && earliest.String != "" {
-			dataRange.Earliest = parseTime(earliest.String)
-		}
-		if latest.Valid && latest.String != "" {
-			dataRange.Latest = parseTime(latest.String)
-		}
-		stats["dataRange"] = dataRange
-	}
+	// Data range
+	dataRange, _ := s.GetDataRange(ctx)
+	stats["dataRange"] = dataRange
 
 	return stats, nil
 }
 
-// GetBandwidthAggregated returns bandwidth data from pre-aggregated rollup tables
-// Uses tiered approach: minutely for <24h, hourly for <7d, daily for longer
-func (s *SQLiteStore) GetBandwidthAggregated(ctx context.Context, start, end time.Time, bucketSeconds int) ([]BandwidthBucket, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	startUnix := start.UTC().Unix()
-	endUnix := end.UTC().Unix()
-	rangeSeconds := endUnix - startUnix
-
-	// Choose rollup table based on time range
-	var table string
-	var bucketSize int64
-
-	switch {
-	case rangeSeconds <= 24*3600: // <= 24 hours: use minutely
-		table = "bandwidth_minutely"
-		bucketSize = 60
-	case rangeSeconds <= 7*24*3600: // <= 7 days: use hourly
-		table = "bandwidth_hourly"
-		bucketSize = 3600
-	default: // > 7 days: use daily
-		table = "bandwidth_daily"
-		bucketSize = 86400
+// parseTime parses a time string from SQLite
+func parseTime(s string) time.Time {
+	formats := []string{
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999 +0000 UTC",
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02T15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
 	}
-
-	// Truncate start/end to bucket boundaries
-	startBucket := (startUnix / bucketSize) * bucketSize
-	endBucket := (endUnix / bucketSize) * bucketSize
-
-	query := fmt.Sprintf(`
-		SELECT bucket, tx_bytes, rx_bytes
-		FROM %s
-		WHERE bucket >= ? AND bucket <= ?
-		ORDER BY bucket ASC
-	`, table)
-
-	rows, err := s.db.QueryContext(ctx, query, startBucket, endBucket)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query bandwidth rollup: %w", err)
-	}
-	defer rows.Close()
-
-	var buckets []BandwidthBucket
-	for rows.Next() {
-		var bucket int64
-		var txBytes, rxBytes int64
-		if err := rows.Scan(&bucket, &txBytes, &rxBytes); err != nil {
-			return nil, fmt.Errorf("failed to scan bucket: %w", err)
-		}
-		buckets = append(buckets, BandwidthBucket{
-			Time:    time.Unix(bucket, 0).UTC(),
-			TxBytes: txBytes,
-			RxBytes: rxBytes,
-		})
-	}
-
-	return buckets, rows.Err()
-}
-
-// GetBandwidthByIPs returns bandwidth aggregated by time bucket filtered by node IPs
-// When IPs are provided, only traffic where src_ip or dst_ip matches is included
-func (s *SQLiteStore) GetBandwidthByIPs(ctx context.Context, start, end time.Time, ips []string) ([]BandwidthBucket, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if len(ips) == 0 {
-		// No IPs provided, return all bandwidth
-		return s.GetBandwidthAggregated(ctx, start, end, 0)
-	}
-
-	// Use the same format that SQLite stores time.Time values
-	const sqliteFormat = "2006-01-02 15:04:05"
-	startStr := start.UTC().Format(sqliteFormat)
-	endStr := end.UTC().Format(sqliteFormat)
-
-	// Determine bucket size based on time range
-	rangeSeconds := int64(end.Sub(start).Seconds())
-	var bucketSize int64
-
-	switch {
-	case rangeSeconds <= 24*3600: // <= 24 hours: minutely buckets
-		bucketSize = 60
-	case rangeSeconds <= 7*24*3600: // <= 7 days: hourly buckets
-		bucketSize = 3600
-	default: // > 7 days: daily buckets
-		bucketSize = 86400
-	}
-
-	// Build placeholder list for IPs
-	placeholders := make([]string, len(ips))
-	args := make([]interface{}, 0, len(ips)*2+2)
-	args = append(args, startStr, endStr)
-	for i, ip := range ips {
-		placeholders[i] = "?"
-		args = append(args, ip)
-	}
-	ipList := strings.Join(placeholders, ", ")
-
-	// Also add IPs again for the second IN clause
-	for _, ip := range ips {
-		args = append(args, ip)
-	}
-
-	query := fmt.Sprintf(`
-		SELECT
-			(CAST(strftime('%%s', substr(logged_at, 1, 19)) AS INTEGER) / %d) * %d as bucket,
-			SUM(tx_bytes) as tx_bytes,
-			SUM(rx_bytes) as rx_bytes
-		FROM flow_logs
-		WHERE logged_at >= ? AND logged_at <= ?
-		AND (src_ip IN (%s) OR dst_ip IN (%s))
-		GROUP BY bucket
-		ORDER BY bucket ASC
-	`, bucketSize, bucketSize, ipList, ipList)
-
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query bandwidth by IPs: %w", err)
-	}
-	defer rows.Close()
-
-	var buckets []BandwidthBucket
-	for rows.Next() {
-		var bucket int64
-		var txBytes, rxBytes int64
-		if err := rows.Scan(&bucket, &txBytes, &rxBytes); err != nil {
-			return nil, fmt.Errorf("failed to scan bucket: %w", err)
-		}
-		buckets = append(buckets, BandwidthBucket{
-			Time:    time.Unix(bucket, 0).UTC(),
-			TxBytes: txBytes,
-			RxBytes: rxBytes,
-		})
-	}
-
-	return buckets, rows.Err()
-}
-
-// BackfillBandwidthRollups rebuilds rollup tables from existing flow_logs
-// Call this once after adding rollup tables to populate from historical data
-func (s *SQLiteStore) BackfillBandwidthRollups(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	log.Println("Starting bandwidth rollup backfill...")
-
-	// Clear existing rollups
-	for _, table := range []string{"bandwidth_minutely", "bandwidth_hourly", "bandwidth_daily"} {
-		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", table)); err != nil {
-			return fmt.Errorf("failed to clear %s: %w", table, err)
+	for _, format := range formats {
+		if t, err := time.Parse(format, s); err == nil {
+			return t
 		}
 	}
-
-	// Backfill minutely (aggregate from raw logs)
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO bandwidth_minutely (bucket, tx_bytes, rx_bytes)
-		SELECT
-			(CAST(strftime('%s', substr(logged_at, 1, 19)) AS INTEGER) / 60) * 60 as bucket,
-			SUM(tx_bytes),
-			SUM(rx_bytes)
-		FROM flow_logs
-		WHERE traffic_type IN ('virtual', 'subnet')
-		GROUP BY bucket
-		HAVING bucket IS NOT NULL
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to backfill minutely: %w", err)
-	}
-
-	// Backfill hourly (aggregate from minutely)
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO bandwidth_hourly (bucket, tx_bytes, rx_bytes)
-		SELECT
-			(bucket / 3600) * 3600 as hour_bucket,
-			SUM(tx_bytes),
-			SUM(rx_bytes)
-		FROM bandwidth_minutely
-		GROUP BY hour_bucket
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to backfill hourly: %w", err)
-	}
-
-	// Backfill daily (aggregate from hourly)
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO bandwidth_daily (bucket, tx_bytes, rx_bytes)
-		SELECT
-			(bucket / 86400) * 86400 as day_bucket,
-			SUM(tx_bytes),
-			SUM(rx_bytes)
-		FROM bandwidth_hourly
-		GROUP BY day_bucket
-	`)
-	if err != nil {
-		return fmt.Errorf("failed to backfill daily: %w", err)
-	}
-
-	// Log counts
-	var minCount, hourCount, dayCount int64
-	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM bandwidth_minutely").Scan(&minCount)
-	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM bandwidth_hourly").Scan(&hourCount)
-	s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM bandwidth_daily").Scan(&dayCount)
-
-	log.Printf("Bandwidth rollup backfill complete: %d minutely, %d hourly, %d daily buckets", minCount, hourCount, dayCount)
-	return nil
-}
-
-// UpdateBandwidthRollups updates all rollup tables with new flow log data
-func (s *SQLiteStore) UpdateBandwidthRollups(ctx context.Context, logs []FlowLog) error {
-	if len(logs) == 0 {
-		return nil
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Aggregate logs by minute, hour, and day buckets
-	minutely := make(map[int64][2]int64) // bucket -> [tx, rx]
-	hourly := make(map[int64][2]int64)
-	daily := make(map[int64][2]int64)
-
-	for _, log := range logs {
-		// Only count virtual and subnet traffic
-		if log.TrafficType != "virtual" && log.TrafficType != "subnet" {
-			continue
-		}
-
-		ts := log.LoggedAt.UTC().Unix()
-
-		// Minutely bucket (truncate to minute)
-		minBucket := (ts / 60) * 60
-		m := minutely[minBucket]
-		m[0] += log.TxBytes
-		m[1] += log.RxBytes
-		minutely[minBucket] = m
-
-		// Hourly bucket (truncate to hour)
-		hourBucket := (ts / 3600) * 3600
-		h := hourly[hourBucket]
-		h[0] += log.TxBytes
-		h[1] += log.RxBytes
-		hourly[hourBucket] = h
-
-		// Daily bucket (truncate to day)
-		dayBucket := (ts / 86400) * 86400
-		d := daily[dayBucket]
-		d[0] += log.TxBytes
-		d[1] += log.RxBytes
-		daily[dayBucket] = d
-	}
-
-	// Upsert into rollup tables
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	// Helper to upsert rollups
-	upsert := func(table string, data map[int64][2]int64) error {
-		stmt, err := tx.PrepareContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (bucket, tx_bytes, rx_bytes) VALUES (?, ?, ?)
-			ON CONFLICT(bucket) DO UPDATE SET
-				tx_bytes = tx_bytes + excluded.tx_bytes,
-				rx_bytes = rx_bytes + excluded.rx_bytes
-		`, table))
-		if err != nil {
-			return err
-		}
-		defer stmt.Close()
-
-		for bucket, bytes := range data {
-			if _, err := stmt.ExecContext(ctx, bucket, bytes[0], bytes[1]); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	if err := upsert("bandwidth_minutely", minutely); err != nil {
-		return fmt.Errorf("failed to upsert minutely: %w", err)
-	}
-	if err := upsert("bandwidth_hourly", hourly); err != nil {
-		return fmt.Errorf("failed to upsert hourly: %w", err)
-	}
-	if err := upsert("bandwidth_daily", daily); err != nil {
-		return fmt.Errorf("failed to upsert daily: %w", err)
-	}
-
-	return tx.Commit()
+	return time.Time{}
 }

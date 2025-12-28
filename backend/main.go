@@ -95,9 +95,19 @@ func main() {
 			pollerConfig.InitialBackfill = d
 		}
 	}
-	if retention := os.Getenv("TSFLOW_RETENTION"); retention != "" {
+	if retention := os.Getenv("TSFLOW_RETENTION_MINUTELY"); retention != "" {
 		if d, err := time.ParseDuration(retention); err == nil {
-			pollerConfig.RetentionPeriod = d
+			pollerConfig.RetentionMinutely = d
+		}
+	}
+	if retention := os.Getenv("TSFLOW_RETENTION_HOURLY"); retention != "" {
+		if d, err := time.ParseDuration(retention); err == nil {
+			pollerConfig.RetentionHourly = d
+		}
+	}
+	if retention := os.Getenv("TSFLOW_RETENTION_DAILY"); retention != "" {
+		if d, err := time.ParseDuration(retention); err == nil {
+			pollerConfig.RetentionDaily = d
 		}
 	}
 
@@ -142,20 +152,25 @@ func main() {
 
 	api := router.Group("/api")
 	{
-		// Existing endpoints (live API queries)
-		api.GET("/devices", handlerService.GetDevices)
-		api.GET("/services-records", handlerService.GetServicesAndRecords)
-		api.GET("/network-logs", handlerService.GetNetworkLogs)
-		api.GET("/network-map", handlerService.GetNetworkMap)
+		// Existing endpoints (live API queries) - short cache
+		liveCache := middleware.CacheMiddleware(middleware.ShortCacheConfig())
+		api.GET("/devices", liveCache, handlerService.GetDevices)
+		api.GET("/services-records", liveCache, handlerService.GetServicesAndRecords)
+		api.GET("/network-logs", liveCache, handlerService.GetNetworkLogs)
+		api.GET("/network-map", liveCache, handlerService.GetNetworkMap)
 		api.GET("/devices/:deviceId/flows", handlerService.GetDeviceFlows)
-		api.GET("/dns/nameservers", handlerService.GetDNSNameservers)
+		api.GET("/dns/nameservers", liveCache, handlerService.GetDNSNameservers)
 
-		// New endpoints for stored historical data
+		// Stored historical data - longer cache for time-series
+		histCache := middleware.CacheMiddleware(middleware.LongCacheConfig())
 		api.GET("/flow-logs", handlerService.GetStoredFlowLogs)
-		api.GET("/flow-logs/aggregated", handlerService.GetAggregatedFlowLogs)
+		api.GET("/flow-logs/aggregated", histCache, handlerService.GetAggregatedFlowLogs)
 		api.GET("/flow-logs/range", handlerService.GetDataRange)
-		api.GET("/bandwidth", handlerService.GetBandwidthAggregated)
-		api.GET("/poller/status", handlerService.GetPollerStatus)
+		api.GET("/bandwidth", histCache, handlerService.GetBandwidthAggregated)
+
+		// Status endpoints - no cache
+		noCache := middleware.CacheMiddleware(middleware.NoCacheConfig())
+		api.GET("/poller/status", noCache, handlerService.GetPollerStatus)
 		api.POST("/poller/trigger", handlerService.TriggerPoll)
 	}
 
@@ -183,7 +198,8 @@ func main() {
 	log.Printf("Environment: %s", cfg.Environment)
 	log.Printf("Database: %s", dbPath)
 	log.Printf("Poll Interval: %s", pollerConfig.PollInterval)
-	log.Printf("Retention Period: %s", pollerConfig.RetentionPeriod)
+	log.Printf("Retention: minutely=%s, hourly=%s, daily=%s",
+		pollerConfig.RetentionMinutely, pollerConfig.RetentionHourly, pollerConfig.RetentionDaily)
 
 	// Log authentication method being used
 	if cfg.TailscaleOAuthClientID != "" && cfg.TailscaleOAuthClientSecret != "" {

@@ -17,14 +17,38 @@ interface ProcessedNetwork {
 	links: NetworkLink[];
 }
 
-// Get device name from IP
+// Check if a string looks like an IP address (vs a device ID)
+function isIPAddress(value: string): boolean {
+	// IPv4: contains dots and numbers
+	if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$/.test(value)) return true;
+	// IPv6: contains colons but starts with [ or has many colons
+	if (value.startsWith('[') || (value.match(/:/g) || []).length > 1) return true;
+	// Tailscale 100.x.x.x format
+	if (value.startsWith('100.')) return true;
+	return false;
+}
+
+// Get device name from IP or device ID
 function getDeviceName(
-	ip: string,
+	ipOrId: string,
 	devices: Device[] = [],
 	services: Record<string, VIPServiceInfo> = {},
 	records: Record<string, StaticRecordInfo> = {}
 ): string {
-	// Check regular devices first
+	// If it's a device ID, look up directly
+	if (!isIPAddress(ipOrId)) {
+		const device = devices.find((d) => d.id === ipOrId);
+		if (device) {
+			const shortName = device.name.split('.')[0];
+			return shortName || device.name;
+		}
+		return ipOrId; // Return ID as-is if no device found
+	}
+
+	// Extract IP from IP:port format
+	const ip = extractIP(ipOrId);
+
+	// Check regular devices by IP
 	const device = devices.find((d) => d.addresses.some((addr) => ipMatches(ip, addr)));
 	if (device) {
 		const shortName = device.name.split('.')[0];
@@ -49,9 +73,30 @@ function getDeviceName(
 	return ip;
 }
 
-// Get device data from IP
-function getDeviceData(ip: string, devices: Device[] = []): Device | null {
+// Get device data from IP or device ID
+function getDeviceData(ipOrId: string, devices: Device[] = []): Device | null {
+	// If it's a device ID, look up directly
+	if (!isIPAddress(ipOrId)) {
+		return devices.find((d) => d.id === ipOrId) || null;
+	}
+	// Otherwise look up by IP
+	const ip = extractIP(ipOrId);
 	return devices.find((d) => d.addresses.some((addr) => ipMatches(ip, addr))) || null;
+}
+
+// Get the IP from either IP:port format or device ID
+function resolveToIP(ipOrId: string, devices: Device[] = []): string {
+	// If it's already an IP, extract it
+	if (isIPAddress(ipOrId)) {
+		return extractIP(ipOrId);
+	}
+	// If it's a device ID, get the first IP from the device
+	const device = devices.find((d) => d.id === ipOrId);
+	if (device && device.addresses.length > 0) {
+		return device.addresses[0];
+	}
+	// Return the ID as-is (for external nodes)
+	return ipOrId;
 }
 
 // Process network logs to create nodes and links
@@ -80,16 +125,17 @@ export function processNetworkLogs(
 		];
 
 		allTraffic.forEach((traffic) => {
-			const srcIP = extractIP(traffic.src);
-			const dstIP = extractIP(traffic.dst);
+			// Handle both IP:port format (live) and device ID format (historical)
+			const srcIP = resolveToIP(traffic.src, devices);
+			const dstIP = resolveToIP(traffic.dst, devices);
 
 			// Create or update source node
-			const srcDeviceName = getDeviceName(srcIP, devices, services, records);
+			const srcDeviceName = getDeviceName(traffic.src, devices, services, records);
 			const srcNodeId = srcDeviceName !== srcIP ? srcDeviceName : srcIP;
 
 			if (!nodeMap.has(srcNodeId)) {
 				const isTailscale = categorizeIP(srcIP).includes('tailscale');
-				const deviceData = getDeviceData(srcIP, devices);
+				const deviceData = getDeviceData(traffic.src, devices);
 				const ipTags = categorizeIP(srcIP);
 				const deviceTags = deviceData?.tags || [];
 				const allTags = [...new Set([...ipTags, ...deviceTags])];
@@ -117,7 +163,7 @@ export function processNetworkLogs(
 				if (!existingNode.ips.includes(srcIP)) {
 					existingNode.ips.push(srcIP);
 					const newTags = categorizeIP(srcIP);
-					const deviceData = getDeviceData(srcIP, devices);
+					const deviceData = getDeviceData(traffic.src, devices);
 					const deviceTags = deviceData?.tags || [];
 					[...newTags, ...deviceTags].forEach((tag) => {
 						if (!existingNode.tags.includes(tag)) {
@@ -131,12 +177,12 @@ export function processNetworkLogs(
 			}
 
 			// Create or update destination node
-			const dstDeviceName = getDeviceName(dstIP, devices, services, records);
+			const dstDeviceName = getDeviceName(traffic.dst, devices, services, records);
 			const dstNodeId = dstDeviceName !== dstIP ? dstDeviceName : dstIP;
 
 			if (!nodeMap.has(dstNodeId)) {
 				const isTailscale = categorizeIP(dstIP).includes('tailscale');
-				const deviceData = getDeviceData(dstIP, devices);
+				const deviceData = getDeviceData(traffic.dst, devices);
 				const ipTags = categorizeIP(dstIP);
 				const deviceTags = deviceData?.tags || [];
 				const allTags = [...new Set([...ipTags, ...deviceTags])];
@@ -164,7 +210,7 @@ export function processNetworkLogs(
 				if (!existingNode.ips.includes(dstIP)) {
 					existingNode.ips.push(dstIP);
 					const newTags = categorizeIP(dstIP);
-					const deviceData = getDeviceData(dstIP, devices);
+					const deviceData = getDeviceData(traffic.dst, devices);
 					const deviceTags = deviceData?.tags || [];
 					[...newTags, ...deviceTags].forEach((tag) => {
 						if (!existingNode.tags.includes(tag)) {

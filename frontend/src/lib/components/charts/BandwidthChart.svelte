@@ -1,9 +1,8 @@
 <script lang="ts">
 	import { dataSourceStore } from '$lib/stores/data-source-store';
-	import { uiStore, filteredNodes } from '$lib/stores';
+	import { uiStore, filteredNodes, timeRangeStore, TIME_RANGES } from '$lib/stores';
 	import { tailscaleService, type BandwidthBucket } from '$lib/services';
 	import { formatBytes } from '$lib/utils';
-	import { onMount } from 'svelte';
 
 	// Chart dimensions
 	const height = 80;
@@ -43,27 +42,33 @@
 		}
 	});
 
-	// Fetch bandwidth data when data range, mode, or selected node changes
+	// Get current time range for live mode
+	const liveTimeRange = $derived.by(() => {
+		const selected = $timeRangeStore.selected;
+		if (selected === 'custom' && $timeRangeStore.customStart && $timeRangeStore.customEnd) {
+			return { start: $timeRangeStore.customStart, end: $timeRangeStore.customEnd };
+		}
+		const preset = TIME_RANGES.find((r) => r.value === selected);
+		const minutes = preset?.minutes || 5;
+		const end = new Date();
+		const start = new Date(end.getTime() - minutes * 60 * 1000);
+		return { start, end };
+	});
+
+	// Fetch bandwidth data when data range, mode, time range, or selected node changes
 	$effect(() => {
 		const dataRange = $dataSourceStore.dataRange;
 		const mode = $dataSourceStore.mode;
 		const nodeIPs = selectedNodeIPs;
+		const timeRange = liveTimeRange;
 
-		if (dataRange?.earliest && dataRange?.latest) {
-			// Always fetch full available range for complete chart view
+		if (mode === 'live') {
+			// In live mode, only fetch data for the selected time range
+			fetchBandwidth(timeRange.start, timeRange.end, nodeIPs);
+		} else if (dataRange?.earliest && dataRange?.latest) {
+			// In historical mode, fetch full available range
 			fetchBandwidth(new Date(dataRange.earliest), new Date(dataRange.latest), nodeIPs);
 		}
-	});
-
-	// Calculate live mode highlight range (last 5 minutes)
-	const liveRangeX = $derived.by(() => {
-		if ($dataSourceStore.mode !== 'live' || chartData.length === 0) return null;
-		const now = new Date();
-		const fiveMinAgo = new Date(now.getTime() - 5 * 60 * 1000);
-		return {
-			start: scaleX(fiveMinAgo.getTime()),
-			end: scaleX(now.getTime())
-		};
 	});
 
 	async function fetchBandwidth(start: Date, end: Date, ips: string[] | null) {
@@ -71,11 +76,13 @@
 		try {
 			// Let backend decide optimal bucket size based on time range
 			const response = await tailscaleService.getBandwidth(start, end, ips || undefined);
-			chartData = (response.buckets || []).map((b) => ({
-				time: new Date(b.time),
-				txBytes: b.txBytes,
-				rxBytes: b.rxBytes
-			}));
+			chartData = (response.buckets || [])
+				.map((b) => ({
+					time: new Date(b.time),
+					txBytes: b.txBytes,
+					rxBytes: b.rxBytes
+				}))
+				.sort((a, b) => a.time.getTime() - b.time.getTime());
 		} catch (err) {
 			console.error('Failed to fetch bandwidth:', err);
 			chartData = [];
@@ -179,23 +186,15 @@
 		return { tx, rx, total: tx + rx };
 	});
 
-	// Calculate totals for selected/live range or all data
+	// Calculate totals for selected range (historical mode only) or all data
 	const totals = $derived.by(() => {
 		const selectedStart = $dataSourceStore.selectedStart;
 		const selectedEnd = $dataSourceStore.selectedEnd;
 		const mode = $dataSourceStore.mode;
 
-		// In live mode, sum data within last 5 minutes
+		// In live mode, we only fetched the relevant time range, so use all data
 		if (mode === 'live') {
-			const now = new Date();
-			const fiveMinAgo = new Date(now.getTime() - 5 * 60 * 1000);
-			const dataToSum = chartData.filter((d) => {
-				const t = d.time.getTime();
-				return t >= fiveMinAgo.getTime() && t <= now.getTime();
-			});
-			const tx = dataToSum.reduce((sum, d) => sum + d.txBytes, 0);
-			const rx = dataToSum.reduce((sum, d) => sum + d.rxBytes, 0);
-			return { tx, rx, total: tx + rx };
+			return fullTotals;
 		}
 
 		// In historical mode with selection, sum data within selected range
@@ -213,13 +212,12 @@
 		return fullTotals;
 	});
 
-	// Check if we're showing a subset of data
+	// Check if we're showing a subset of data (only in historical mode with selection)
 	const isShowingSubset = $derived(
-		($dataSourceStore.mode === 'live' && chartData.length > 0) ||
-		($dataSourceStore.mode === 'historical' &&
+		$dataSourceStore.mode === 'historical' &&
 		$dataSourceStore.selectedStart !== null &&
 		$dataSourceStore.selectedEnd !== null &&
-		totals.total !== fullTotals.total)
+		totals.total !== fullTotals.total
 	);
 
 	// Generate time axis ticks
@@ -259,9 +257,13 @@
 				{:else}
 					Bandwidth Over Time
 				{/if}
-				{#if isShowingSubset}
+				{#if $dataSourceStore.mode === 'live'}
 					<span class="text-primary/70">
-						({$dataSourceStore.mode === 'live' ? 'last 5 min' : 'selected range'})
+						({$timeRangeStore.selected})
+					</span>
+				{:else if isShowingSubset}
+					<span class="text-primary/70">
+						(selected range)
 					</span>
 				{/if}
 			</span>
@@ -333,25 +335,6 @@
 						fill="rgb(59, 130, 246)"
 						fill-opacity="0.2"
 						stroke="rgb(59, 130, 246)"
-						stroke-width="2"
-						stroke-opacity="0.6"
-					/>
-				{/if}
-			{/if}
-
-			<!-- Live range indicator (last 5 minutes) -->
-			{#if liveRangeX !== null}
-				{@const startX = Math.max(padding.left, liveRangeX.start)}
-				{@const endX = Math.min(containerWidth - padding.right, liveRangeX.end)}
-				{#if endX > startX}
-					<rect
-						x={startX}
-						y={padding.top}
-						width={endX - startX}
-						height={chartHeight}
-						fill="rgb(16, 185, 129)"
-						fill-opacity="0.15"
-						stroke="rgb(16, 185, 129)"
 						stroke-width="2"
 						stroke-opacity="0.6"
 					/>

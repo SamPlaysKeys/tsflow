@@ -47,20 +47,24 @@ export interface StoredFlowLogsResponse {
 }
 
 export interface AggregatedFlow {
-	nodeId: string;
+	// Node pair aggregates (device IDs or IPs for external nodes)
+	srcNodeId: string;
+	dstNodeId: string;
 	trafficType: string;
-	protocol: number;
-	srcIp: string;
-	srcPort: number;
-	dstIp: string;
-	dstPort: number;
 	totalTxBytes: number;
 	totalRxBytes: number;
 	totalTxPkts: number;
 	totalRxPkts: number;
 	flowCount: number;
-	firstSeen: string;
-	lastSeen: string;
+	// Legacy fields for backwards compatibility
+	nodeId?: string;
+	protocol?: number;
+	srcIp?: string;
+	srcPort?: number;
+	dstIp?: string;
+	dstPort?: number;
+	firstSeen?: string;
+	lastSeen?: string;
 }
 
 export interface AggregatedFlowsResponse {
@@ -146,12 +150,18 @@ export const tailscaleService = {
 		return api.get<PollerStatus>('/poller/status');
 	},
 
-	async getBandwidth(start: Date, end: Date, ips?: string[]): Promise<BandwidthResponse> {
+	async getBandwidth(start: Date, end: Date, ipsOrNodeId?: string[] | string): Promise<BandwidthResponse> {
 		const startISO = start.toISOString();
 		const endISO = end.toISOString();
 		let url = `/bandwidth?start=${startISO}&end=${endISO}`;
-		if (ips && ips.length > 0) {
-			url += `&ips=${ips.join(',')}`;
+		if (ipsOrNodeId) {
+			if (Array.isArray(ipsOrNodeId)) {
+				// Backwards compatible: pass IPs to resolve to node IDs
+				url += `&ips=${ipsOrNodeId.join(',')}`;
+			} else {
+				// New: pass node ID directly
+				url += `&nodeId=${encodeURIComponent(ipsOrNodeId)}`;
+			}
 		}
 		return api.get<BandwidthResponse>(url);
 	}

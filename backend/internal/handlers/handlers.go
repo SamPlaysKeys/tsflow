@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -25,14 +24,12 @@ const (
 	MaxLogsInMemory = 10000
 	// MaxLogsInResponse limits logs returned in a single response
 	MaxLogsInResponse = 50000
-	// DefaultFlowLogLimit is the default limit for stored flow log queries
-	DefaultFlowLogLimit = 10000
-	// MaxFlowLogLimit is the maximum limit for stored flow log queries
-	MaxFlowLogLimit = 100000
 	// DefaultQueryTimeout is the default timeout for database queries
 	DefaultQueryTimeout = 30 * time.Second
 	// ShortQueryTimeout is the timeout for quick database queries
 	ShortQueryTimeout = 10 * time.Second
+	// AggregationQueryTimeout is the timeout for heavy aggregation queries
+	AggregationQueryTimeout = 60 * time.Second
 )
 
 type Handlers struct {
@@ -227,7 +224,7 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, logs)
 }
 
-// GetStoredFlowLogs retrieves flow logs from the local SQLite database
+// GetStoredFlowLogs retrieves recent flow logs from the local SQLite database
 func (h *Handlers) GetStoredFlowLogs(c *gin.Context) {
 	if h.store == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -237,21 +234,12 @@ func (h *Handlers) GetStoredFlowLogs(c *gin.Context) {
 	}
 
 	start := c.Query("start")
-	end := c.Query("end")
-	limitStr := c.DefaultQuery("limit", strconv.Itoa(DefaultFlowLogLimit))
 
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit <= 0 {
-		limit = DefaultFlowLogLimit
-	}
-	if limit > MaxFlowLogLimit {
-		limit = MaxFlowLogLimit
-	}
-
-	var startTime, endTime time.Time
+	var startTime time.Time
+	var err error
 
 	if start == "" {
-		startTime = time.Now().Add(-1 * time.Hour)
+		startTime = time.Now().Add(-10 * time.Minute)
 	} else {
 		startTime, err = time.Parse(time.RFC3339, start)
 		if err != nil {
@@ -260,20 +248,10 @@ func (h *Handlers) GetStoredFlowLogs(c *gin.Context) {
 		}
 	}
 
-	if end == "" {
-		endTime = time.Now()
-	} else {
-		endTime, err = time.Parse(time.RFC3339, end)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end time"})
-			return
-		}
-	}
-
 	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
 	defer cancel()
 
-	logs, err := h.store.GetFlowLogs(ctx, startTime, endTime, limit)
+	logs, err := h.store.GetRecentFlowLogs(ctx, startTime)
 	if err != nil {
 		log.Printf("ERROR GetStoredFlowLogs: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -287,16 +265,14 @@ func (h *Handlers) GetStoredFlowLogs(c *gin.Context) {
 		"logs": logs,
 		"metadata": gin.H{
 			"count":  len(logs),
-			"start":  startTime,
-			"end":    endTime,
-			"limit":  limit,
+			"since":  startTime,
 			"source": "database",
 		},
 	})
 }
 
-// GetAggregatedFlowLogs returns aggregated node-to-node traffic without arbitrary limits
-// This is the scalable endpoint for large networks - groups flows by src/dst IP pairs
+// GetAggregatedFlowLogs returns pre-aggregated node-to-node traffic
+// This is the scalable endpoint for large networks - uses pre-computed node pairs
 func (h *Handlers) GetAggregatedFlowLogs(c *gin.Context) {
 	if h.store == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -331,26 +307,69 @@ func (h *Handlers) GetAggregatedFlowLogs(c *gin.Context) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
-	defer cancel()
+	// Calculate bucket size based on time range
+	duration := endTime.Sub(startTime)
+	var bucketSize int64 = 60 // 1 minute
+	if duration > 24*time.Hour {
+		bucketSize = 3600 // 1 hour
+	}
+	if duration > 7*24*time.Hour {
+		bucketSize = 86400 // 1 day
+	}
 
-	flows, err := h.store.GetAggregatedFlows(ctx, startTime, endTime)
-	if err != nil {
-		log.Printf("ERROR GetAggregatedFlowLogs: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to fetch aggregated flows",
-			"message": err.Error(),
+	var aggregates []database.NodePairAggregate
+	source := "database"
+
+	// Try rolling cache first for recent data (within last hour)
+	if h.poller != nil && duration <= time.Hour {
+		cache := h.poller.GetRollingCache()
+		if cache.HasDataFor(startTime, endTime) {
+			aggregates = cache.GetNodePairs(startTime, endTime)
+			source = "cache"
+		}
+	}
+
+	// Fall back to database if cache miss or no data
+	if len(aggregates) == 0 {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), AggregationQueryTimeout)
+		defer cancel()
+
+		// Use pre-computed node pair aggregates
+		aggregates, err = h.store.GetNodePairAggregates(ctx, startTime, endTime, bucketSize)
+		if err != nil {
+			log.Printf("ERROR GetAggregatedFlowLogs: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "Failed to fetch aggregated flows",
+				"message": err.Error(),
+			})
+			return
+		}
+		source = "database"
+	}
+
+	// Convert to frontend-expected format
+	flows := make([]gin.H, 0, len(aggregates))
+	for _, agg := range aggregates {
+		flows = append(flows, gin.H{
+			"srcNodeId":    agg.SrcNodeID,
+			"dstNodeId":    agg.DstNodeID,
+			"trafficType":  agg.TrafficType,
+			"totalTxBytes": agg.TxBytes,
+			"totalRxBytes": agg.RxBytes,
+			"totalTxPkts":  agg.TxPkts,
+			"totalRxPkts":  agg.RxPkts,
+			"flowCount":    agg.FlowCount,
 		})
-		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"flows": flows,
 		"metadata": gin.H{
-			"count":  len(flows),
-			"start":  startTime,
-			"end":    endTime,
-			"source": "database",
+			"count":      len(flows),
+			"start":      startTime,
+			"end":        endTime,
+			"bucketSize": bucketSize,
+			"source":     source,
 		},
 	})
 }
@@ -433,7 +452,7 @@ func (h *Handlers) GetBandwidthAggregated(c *gin.Context) {
 
 	start := c.Query("start")
 	end := c.Query("end")
-	ipsStr := c.Query("ips") // Comma-separated list of IPs to filter by
+	nodeID := c.Query("nodeId") // Optional: filter by device ID
 
 	var err error
 	var startTime, endTime time.Time
@@ -458,35 +477,157 @@ func (h *Handlers) GetBandwidthAggregated(c *gin.Context) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
-	defer cancel()
-
 	var buckets []database.BandwidthBucket
+	source := "database"
 
-	// If IPs provided, filter by those IPs
-	if ipsStr != "" {
-		ips := strings.Split(ipsStr, ",")
-		for i := range ips {
-			ips[i] = strings.TrimSpace(ips[i])
+	// Try rolling cache first for recent data (within last hour)
+	if h.poller != nil {
+		cache := h.poller.GetRollingCache()
+		if cache.HasDataFor(startTime, endTime) {
+			if nodeID != "" {
+				buckets = cache.GetNodeBandwidth(startTime, endTime, nodeID)
+			} else {
+				buckets = cache.GetBandwidth(startTime, endTime)
+			}
+			source = "cache"
 		}
-		buckets, err = h.store.GetBandwidthByIPs(ctx, startTime, endTime, ips)
-	} else {
-		buckets, err = h.store.GetBandwidthAggregated(ctx, startTime, endTime, 0)
 	}
 
-	if err != nil {
-		log.Printf("ERROR GetBandwidthAggregated: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to fetch bandwidth data",
-			"message": err.Error(),
-		})
-		return
+	// Fall back to database if cache miss or no data
+	if len(buckets) == 0 {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
+		defer cancel()
+
+		// If nodeId provided, filter by that node
+		if nodeID != "" {
+			buckets, err = h.store.GetNodeBandwidth(ctx, startTime, endTime, nodeID)
+		} else {
+			buckets, err = h.store.GetBandwidth(ctx, startTime, endTime)
+		}
+
+		if err != nil {
+			log.Printf("ERROR GetBandwidthAggregated: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "Failed to fetch bandwidth data",
+				"message": err.Error(),
+			})
+			return
+		}
+		source = "database"
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"buckets": buckets,
 		"metadata": gin.H{
-			"count": len(buckets),
+			"count":  len(buckets),
+			"start":  startTime,
+			"end":    endTime,
+			"nodeId": nodeID,
+			"source": source,
+		},
+	})
+}
+
+// GetBandwidthByIPs returns bandwidth data filtered by IP addresses
+// This is for backwards compatibility - converts IPs to node IDs using device cache
+func (h *Handlers) GetBandwidthByIPs(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Database not configured",
+		})
+		return
+	}
+
+	start := c.Query("start")
+	end := c.Query("end")
+	ipsStr := c.Query("ips") // Comma-separated list of IPs
+
+	var err error
+	var startTime, endTime time.Time
+
+	if start == "" {
+		startTime = time.Now().Add(-1 * time.Hour)
+	} else {
+		startTime, err = time.Parse(time.RFC3339, start)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start time"})
+			return
+		}
+	}
+
+	if end == "" {
+		endTime = time.Now()
+	} else {
+		endTime, err = time.Parse(time.RFC3339, end)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end time"})
+			return
+		}
+	}
+
+	// If no IPs provided, return total bandwidth
+	if ipsStr == "" {
+		c.Redirect(http.StatusTemporaryRedirect, "/api/bandwidth?start="+start+"&end="+end)
+		return
+	}
+
+	// Parse IPs and resolve to node IDs using device cache
+	ips := strings.Split(ipsStr, ",")
+	for i := range ips {
+		ips[i] = strings.TrimSpace(ips[i])
+	}
+
+	// Use poller's device cache to resolve IPs to node IDs
+	nodeIDs := make(map[string]bool)
+	if h.poller != nil {
+		cache := h.poller.GetDeviceCache()
+		for _, ip := range ips {
+			nodeID := cache.ResolveIP(ip)
+			nodeIDs[nodeID] = true
+		}
+	} else {
+		// Fallback: use IPs as node IDs (for external IPs)
+		for _, ip := range ips {
+			nodeIDs[ip] = true
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
+	defer cancel()
+
+	// Aggregate bandwidth for all node IDs
+	var allBuckets []database.BandwidthBucket
+	bucketMap := make(map[int64]*database.BandwidthBucket)
+
+	for nodeID := range nodeIDs {
+		buckets, err := h.store.GetNodeBandwidth(ctx, startTime, endTime, nodeID)
+		if err != nil {
+			continue // Skip errors for individual nodes
+		}
+		for _, b := range buckets {
+			bucket := b.Time.Unix()
+			if existing, ok := bucketMap[bucket]; ok {
+				existing.TxBytes += b.TxBytes
+				existing.RxBytes += b.RxBytes
+			} else {
+				bucketMap[bucket] = &database.BandwidthBucket{
+					Time:    b.Time,
+					TxBytes: b.TxBytes,
+					RxBytes: b.RxBytes,
+				}
+			}
+		}
+	}
+
+	// Convert map to slice
+	for _, b := range bucketMap {
+		allBuckets = append(allBuckets, *b)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"buckets": allBuckets,
+		"metadata": gin.H{
+			"count": len(allBuckets),
 			"start": startTime,
 			"end":   endTime,
 			"ips":   ipsStr,

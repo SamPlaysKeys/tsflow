@@ -304,56 +304,48 @@ function convertStoredLogsToNetworkLogs(storedLogs: any[]): NetworkLog[] {
 	return networkLogs;
 }
 
-// Convert aggregated flows to NetworkLog format for the graph
-// Each aggregated flow includes protocol and port information
+// Convert pre-aggregated node-pair flows to NetworkLog format for the graph
+// The backend now returns srcNodeId/dstNodeId (device IDs or IPs for external nodes)
 function convertAggregatedFlowsToNetworkLogs(flows: AggregatedFlow[]): NetworkLog[] {
-	// Group by nodeId to create NetworkLog entries
+	// Group by srcNodeId to create NetworkLog entries
 	const grouped = new Map<string, AggregatedFlow[]>();
 
 	for (const flow of flows) {
-		const key = flow.nodeId;
+		// Use srcNodeId as the primary grouping key
+		const key = flow.srcNodeId;
 		if (!grouped.has(key)) {
 			grouped.set(key, []);
 		}
 		grouped.get(key)!.push(flow);
 	}
 
-	// Helper to format IP:port correctly for IPv4 and IPv6
-	const formatAddress = (ip: string, port: number): string => {
-		if (ip.includes(':')) {
-			// IPv6: use [ip]:port format
-			return `[${ip}]:${port}`;
-		}
-		return `${ip}:${port}`;
-	};
-
 	const networkLogs: NetworkLog[] = [];
+	const now = new Date().toISOString();
 
 	for (const [nodeId, nodeFlows] of grouped) {
 		if (nodeFlows.length === 0) continue;
 
-		const first = nodeFlows[0];
-		const last = nodeFlows[nodeFlows.length - 1];
-
 		const networkLog: NetworkLog = {
-			logged: last.lastSeen,
+			logged: now,
 			nodeId: nodeId,
-			start: first.firstSeen,
-			end: last.lastSeen,
+			start: now,
+			end: now,
 			virtualTraffic: [],
 			subnetTraffic: [],
 			physicalTraffic: []
 		};
 
 		for (const flow of nodeFlows) {
+			// The src/dst are now node IDs (device IDs or IPs)
+			// Format them as addresses for backwards compatibility with graph processing
 			const traffic = {
-				proto: flow.protocol,
-				src: formatAddress(flow.srcIp, flow.srcPort),
-				dst: formatAddress(flow.dstIp, flow.dstPort),
+				proto: flow.protocol || 0,
+				src: flow.srcNodeId,
+				dst: flow.dstNodeId,
 				txBytes: flow.totalTxBytes,
 				rxBytes: flow.totalRxBytes,
-				txPkts: flow.totalTxPkts,
-				rxPkts: flow.totalRxPkts
+				txPkts: flow.totalTxPkts || 0,
+				rxPkts: flow.totalRxPkts || 0
 			};
 
 			switch (flow.trafficType) {

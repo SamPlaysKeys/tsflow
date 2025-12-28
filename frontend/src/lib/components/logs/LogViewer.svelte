@@ -16,10 +16,25 @@
 		return map;
 	});
 
-	// Helper to resolve IP to device name or return the IP
+	// Build device ID to device name lookup map (for aggregated flows)
+	const deviceIdToName = $derived.by(() => {
+		const map = new Map<string, string>();
+		for (const device of $devices) {
+			const displayName = device.hostname || device.name.split('.')[0];
+			map.set(device.id, displayName);
+		}
+		return map;
+	});
+
+	// Helper to resolve IP or device ID to device name
 	function resolveIP(address: string): { ip: string; deviceName?: string } {
 		const ip = extractIP(address);
-		const deviceName = ipToDevice.get(ip);
+		// First try IP lookup
+		let deviceName = ipToDevice.get(ip);
+		// If no match, try device ID lookup (for aggregated flows)
+		if (!deviceName) {
+			deviceName = deviceIdToName.get(ip);
+		}
 		return { ip, deviceName };
 	}
 
