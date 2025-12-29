@@ -42,8 +42,15 @@
 		}
 	});
 
-	// Get current time range for live mode
+	// Get current time range for live mode - use store values when available
 	const liveTimeRange = $derived.by(() => {
+		// First check if store has values (set by other components)
+		const storeStart = $dataSourceStore.selectedStart;
+		const storeEnd = $dataSourceStore.selectedEnd;
+		if (storeStart && storeEnd) {
+			return { start: storeStart, end: storeEnd };
+		}
+		// Fall back to calculating from time range preset
 		const selected = $timeRangeStore.selected;
 		if (selected === 'custom' && $timeRangeStore.customStart && $timeRangeStore.customEnd) {
 			return { start: $timeRangeStore.customStart, end: $timeRangeStore.customEnd };
@@ -60,13 +67,9 @@
 		const dataRange = $dataSourceStore.dataRange;
 		const mode = $dataSourceStore.mode;
 		const nodeIPs = selectedNodeIPs;
-		const timeRange = liveTimeRange;
 
-		if (mode === 'live') {
-			// In live mode, only fetch data for the selected time range
-			fetchBandwidth(timeRange.start, timeRange.end, nodeIPs);
-		} else if (dataRange?.earliest && dataRange?.latest) {
-			// In historical mode, fetch full available range
+		if (dataRange?.earliest && dataRange?.latest) {
+			// Always fetch full available range (same behavior for live and historical)
 			fetchBandwidth(new Date(dataRange.earliest), new Date(dataRange.latest), nodeIPs);
 		}
 	});
@@ -154,28 +157,41 @@
 		return `M${scaleX(first.time.getTime())},${baseline}L${points.join('L')}L${scaleX(last.time.getTime())},${baseline}Z`;
 	});
 
-	// Selected range indicator (for historical mode)
+	// Selected range indicator (for both live and historical modes)
 	const selectedRangeX = $derived.by(() => {
-		const selectedStart = $dataSourceStore.selectedStart;
-		const selectedEnd = $dataSourceStore.selectedEnd;
-		if (!selectedStart || !selectedEnd || $dataSourceStore.mode !== 'historical') return null;
+		const mode = $dataSourceStore.mode;
+		let rangeStart: Date | null = null;
+		let rangeEnd: Date | null = null;
+
+		if (mode === 'live') {
+			// In live mode, use the live time range as the selection
+			rangeStart = liveTimeRange.start;
+			rangeEnd = liveTimeRange.end;
+		} else {
+			// In historical mode, use the selected range from store
+			rangeStart = $dataSourceStore.selectedStart;
+			rangeEnd = $dataSourceStore.selectedEnd;
+		}
+
+		if (!rangeStart || !rangeEnd) return null;
 		return {
-			start: scaleX(selectedStart.getTime()),
-			end: scaleX(selectedEnd.getTime())
+			start: scaleX(rangeStart.getTime()),
+			end: scaleX(rangeEnd.getTime())
 		};
 	});
 
-	// Format time for axis - include date if range spans multiple days
+	// Format time for axis - always show date for clarity
 	function formatTime(time: Date): string {
 		const { minTime, maxTime } = chartBounds;
 		const rangeMs = maxTime - minTime;
-		const dayMs = 24 * 60 * 60 * 1000;
+		const hourMs = 60 * 60 * 1000;
 
-		if (rangeMs > dayMs) {
-			// Show date + time for multi-day ranges
+		if (rangeMs > 2 * hourMs) {
+			// Show date + time for ranges > 2 hours
 			return time.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
 				' ' + time.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 		}
+		// For short ranges, just show time
 		return time.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 	}
 
@@ -186,22 +202,27 @@
 		return { tx, rx, total: tx + rx };
 	});
 
-	// Calculate totals for selected range (historical mode only) or all data
+	// Calculate totals for selected range (both live and historical modes)
 	const totals = $derived.by(() => {
-		const selectedStart = $dataSourceStore.selectedStart;
-		const selectedEnd = $dataSourceStore.selectedEnd;
 		const mode = $dataSourceStore.mode;
+		let rangeStart: Date | null = null;
+		let rangeEnd: Date | null = null;
 
-		// In live mode, we only fetched the relevant time range, so use all data
 		if (mode === 'live') {
-			return fullTotals;
+			// In live mode, use the live time range
+			rangeStart = liveTimeRange.start;
+			rangeEnd = liveTimeRange.end;
+		} else {
+			// In historical mode, use the selected range from store
+			rangeStart = $dataSourceStore.selectedStart;
+			rangeEnd = $dataSourceStore.selectedEnd;
 		}
 
-		// In historical mode with selection, sum data within selected range
-		if (selectedStart && selectedEnd) {
+		// Sum data within selected range
+		if (rangeStart && rangeEnd) {
 			const dataToSum = chartData.filter((d) => {
 				const t = d.time.getTime();
-				return t >= selectedStart.getTime() && t <= selectedEnd.getTime();
+				return t >= rangeStart!.getTime() && t <= rangeEnd!.getTime();
 			});
 			const tx = dataToSum.reduce((sum, d) => sum + d.txBytes, 0);
 			const rx = dataToSum.reduce((sum, d) => sum + d.rxBytes, 0);
@@ -212,13 +233,8 @@
 		return fullTotals;
 	});
 
-	// Check if we're showing a subset of data (only in historical mode with selection)
-	const isShowingSubset = $derived(
-		$dataSourceStore.mode === 'historical' &&
-		$dataSourceStore.selectedStart !== null &&
-		$dataSourceStore.selectedEnd !== null &&
-		totals.total !== fullTotals.total
-	);
+	// Check if we're showing a subset of data
+	const isShowingSubset = $derived(totals.total !== fullTotals.total);
 
 	// Generate time axis ticks
 	const timeAxisTicks = $derived.by(() => {
