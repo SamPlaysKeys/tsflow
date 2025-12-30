@@ -34,7 +34,7 @@ type PollerConfig struct {
 func DefaultPollerConfig() PollerConfig {
 	return PollerConfig{
 		PollInterval:       5 * time.Minute,
-		InitialBackfill:    1 * time.Hour,
+		InitialBackfill:    6 * time.Hour,
 		RetentionMinutely:  24 * time.Hour,
 		RetentionHourly:    7 * 24 * time.Hour,
 		RetentionDaily:     0, // Keep forever
@@ -327,6 +327,9 @@ func (p *Poller) Start(ctx context.Context) error {
 		return nil
 	}
 	p.running = true
+	// Re-initialize channels for restart support (they're nil after Stop())
+	p.stopChan = make(chan struct{})
+	p.doneChan = make(chan struct{})
 	p.mu.Unlock()
 
 	log.Printf("Starting background poller (interval: %v, retention minutely: %v, hourly: %v)",
@@ -530,21 +533,25 @@ func (p *Poller) poll(ctx context.Context) error {
 }
 
 // aggregate creates pre-computed aggregates from flow logs
+// Handles deduplication: Tailscale logs the same traffic from both endpoints
+// (A→B logged by A, B→A logged by B). We normalize pairs by sorting node IDs
+// and use TX-only for bandwidth since RX duplicates the reverse direction's TX.
 func (p *Poller) aggregate(logs []database.FlowLog, baseTime time.Time) (
 	[]database.NodePairAggregate,
 	[]database.BandwidthBucket,
 	[]database.NodeBandwidth,
 ) {
-	// Node pair aggregation: group by (bucket, srcNode, dstNode, trafficType)
+	// Node pair aggregation: group by (bucket, nodeA, nodeB, trafficType)
+	// where nodeA < nodeB (normalized ordering)
 	type nodePairKey struct {
 		bucket      int64
-		srcNodeID   string
-		dstNodeID   string
+		nodeA       string // always the lexicographically smaller ID
+		nodeB       string // always the lexicographically larger ID
 		trafficType string
 	}
 	nodePairMap := make(map[nodePairKey]*database.NodePairAggregate)
 
-	// Total bandwidth: group by bucket
+	// Total bandwidth: group by bucket (TX-only to avoid double counting)
 	bandwidthMap := make(map[int64]*database.BandwidthBucket)
 
 	// Per-node bandwidth: group by (bucket, nodeID)
@@ -564,49 +571,72 @@ func (p *Poller) aggregate(logs []database.FlowLog, baseTime time.Time) (
 		srcNodeID := p.deviceCache.ResolveIP(log.SrcIP)
 		dstNodeID := p.deviceCache.ResolveIP(log.DstIP)
 
-		// Node pair aggregate
+		// Normalize node pair: smaller ID is always nodeA
+		// This merges A→B and B→A into a single bidirectional record
+		var nodeA, nodeB string
+		var isReverse bool
+		if srcNodeID < dstNodeID {
+			nodeA, nodeB = srcNodeID, dstNodeID
+			isReverse = false
+		} else {
+			nodeA, nodeB = dstNodeID, srcNodeID
+			isReverse = true
+		}
+
+		// Node pair aggregate with normalized key
 		npKey := nodePairKey{
 			bucket:      bucket,
-			srcNodeID:   srcNodeID,
-			dstNodeID:   dstNodeID,
+			nodeA:       nodeA,
+			nodeB:       nodeB,
 			trafficType: log.TrafficType,
 		}
 
 		if agg, ok := nodePairMap[npKey]; ok {
-			agg.TxBytes += log.TxBytes
-			agg.RxBytes += log.RxBytes
-			agg.TxPkts += log.TxPkts
-			agg.RxPkts += log.RxPkts
+			if isReverse {
+				// This log is B→A, so TX goes to RxBytes (traffic from B to A)
+				agg.RxBytes += log.TxBytes
+				agg.RxPkts += log.TxPkts
+			} else {
+				// This log is A→B, so TX goes to TxBytes (traffic from A to B)
+				agg.TxBytes += log.TxBytes
+				agg.TxPkts += log.TxPkts
+			}
 			agg.FlowCount++
 		} else {
-			nodePairMap[npKey] = &database.NodePairAggregate{
+			agg := &database.NodePairAggregate{
 				Bucket:      bucket,
-				SrcNodeID:   srcNodeID,
-				DstNodeID:   dstNodeID,
+				SrcNodeID:   nodeA, // nodeA is always "src" in normalized form
+				DstNodeID:   nodeB, // nodeB is always "dst" in normalized form
 				TrafficType: log.TrafficType,
-				TxBytes:     log.TxBytes,
-				RxBytes:     log.RxBytes,
-				TxPkts:      log.TxPkts,
-				RxPkts:      log.RxPkts,
 				FlowCount:   1,
 				Protocols:   "[]",
 				Ports:       "[]",
 			}
+			if isReverse {
+				agg.RxBytes = log.TxBytes
+				agg.RxPkts = log.TxPkts
+			} else {
+				agg.TxBytes = log.TxBytes
+				agg.TxPkts = log.TxPkts
+			}
+			nodePairMap[npKey] = agg
 		}
 
-		// Total bandwidth
+		// Total bandwidth: TX-only (avoids double counting)
+		// Each byte is transmitted once, so sum of all TX = total traffic
 		if bw, ok := bandwidthMap[bucket]; ok {
 			bw.TxBytes += log.TxBytes
-			bw.RxBytes += log.RxBytes
 		} else {
 			bandwidthMap[bucket] = &database.BandwidthBucket{
 				Time:    time.Unix(bucket, 0).UTC(),
 				TxBytes: log.TxBytes,
-				RxBytes: log.RxBytes,
+				RxBytes: 0, // Not used - would duplicate TX
 			}
 		}
 
-		// Per-node bandwidth (track src node)
+		// Per-node bandwidth: TX-only approach
+		// srcNode's TX = what it sent
+		// dstNode's RX = what it received = srcNode's TX
 		srcBwKey := nodeBwKey{bucket: bucket, nodeID: srcNodeID}
 		if bw, ok := nodeBwMap[srcBwKey]; ok {
 			bw.TxBytes += log.TxBytes
@@ -619,16 +649,16 @@ func (p *Poller) aggregate(logs []database.FlowLog, baseTime time.Time) (
 			}
 		}
 
-		// Per-node bandwidth (track dst node for RX)
+		// dstNode receives what srcNode transmitted
 		dstBwKey := nodeBwKey{bucket: bucket, nodeID: dstNodeID}
 		if bw, ok := nodeBwMap[dstBwKey]; ok {
-			bw.RxBytes += log.RxBytes
+			bw.RxBytes += log.TxBytes // dst receives what src sent
 		} else {
 			nodeBwMap[dstBwKey] = &database.NodeBandwidth{
 				Bucket:  bucket,
 				NodeID:  dstNodeID,
 				TxBytes: 0,
-				RxBytes: log.RxBytes,
+				RxBytes: log.TxBytes, // dst receives what src sent
 			}
 		}
 	}
@@ -667,6 +697,9 @@ func (p *Poller) cleanup(ctx context.Context) error {
 	return nil
 }
 
+// Maximum number of flow logs to process in a single batch (prevent memory exhaustion)
+const maxFlowLogsPerBatch = 100000
+
 // convertLogs converts Tailscale API response to database FlowLog entries
 func (p *Poller) convertLogs(logsResp interface{}) []database.FlowLog {
 	var flowLogs []database.FlowLog
@@ -685,6 +718,10 @@ func (p *Poller) convertLogs(logsResp interface{}) []database.FlowLog {
 	if tsLogs, ok := logs.([]tailscale.NetworkFlowLog); ok {
 		for _, tsLog := range tsLogs {
 			flowLogs = append(flowLogs, p.convertTailscaleLog(tsLog)...)
+			if len(flowLogs) >= maxFlowLogsPerBatch {
+				log.Printf("Warning: truncating flow logs at %d entries", maxFlowLogsPerBatch)
+				return flowLogs[:maxFlowLogsPerBatch]
+			}
 		}
 		return flowLogs
 	}
@@ -694,6 +731,10 @@ func (p *Poller) convertLogs(logsResp interface{}) []database.FlowLog {
 		for _, logItem := range logsArray {
 			if logMap, ok := logItem.(map[string]interface{}); ok {
 				flowLogs = append(flowLogs, p.convertMapLog(logMap)...)
+				if len(flowLogs) >= maxFlowLogsPerBatch {
+					log.Printf("Warning: truncating flow logs at %d entries", maxFlowLogsPerBatch)
+					return flowLogs[:maxFlowLogsPerBatch]
+				}
 			}
 		}
 	}
@@ -837,8 +878,13 @@ func parsePort(s string, port *int) (bool, error) {
 			return false, nil
 		}
 		*port = *port*10 + int(c-'0')
+		// Prevent overflow and validate port range
+		if *port > 65535 {
+			*port = 0
+			return false, nil
+		}
 	}
-	return true, nil
+	return *port > 0 && *port <= 65535, nil
 }
 
 func getString(m map[string]interface{}, key string) string {

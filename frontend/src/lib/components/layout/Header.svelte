@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { RefreshCw, PanelLeft, PanelRight, Sun, Moon, Monitor, Network, Link, Activity } from 'lucide-svelte';
-	import { uiStore, loadNetworkData, networkStats, filteredNodes, timeRangeStore, TIME_RANGES, themeStore } from '$lib/stores';
+	import { RefreshCw, PanelLeft, ScrollText, Sun, Moon, Monitor, Network, Link, Activity } from 'lucide-svelte';
+	import { uiStore, loadNetworkData, networkStats, filteredNodes, themeStore } from '$lib/stores';
 	import { formatBytes } from '$lib/utils';
 	import type { ThemeMode } from '$lib/stores';
 
@@ -22,12 +22,6 @@
 		return $filteredNodes.reduce((max, node) =>
 			node.totalBytes > max.totalBytes ? node : max
 		, $filteredNodes[0]);
-	});
-
-	const timeRangeLabel = $derived.by(() => {
-		if ($timeRangeStore.selected === 'custom') return 'Custom';
-		const range = TIME_RANGES.find(r => r.value === $timeRangeStore.selected);
-		return range?.label || '5m';
 	});
 
 	function cycleTheme() {
@@ -114,27 +108,6 @@
 			</div>
 		{/if}
 
-		<!-- Separator -->
-		<div class="h-6 w-px bg-border"></div>
-
-		<!-- Traffic Type Legend -->
-		<div class="flex items-center gap-3 text-xs">
-			<div class="flex items-center gap-1">
-				<span class="h-2 w-2 rounded-full bg-traffic-virtual"></span>
-				<span class="text-muted-foreground">Virtual</span>
-			</div>
-			<div class="flex items-center gap-1">
-				<span class="h-2 w-2 rounded-full bg-traffic-subnet"></span>
-				<span class="text-muted-foreground">Subnet</span>
-			</div>
-			<div class="flex items-center gap-1">
-				<span class="h-2 w-2 rounded-full bg-traffic-physical"></span>
-				<span class="text-muted-foreground">Physical</span>
-			</div>
-		</div>
-
-		<!-- Time Range Badge -->
-		<span class="rounded-full bg-secondary px-2 py-0.5 text-xs font-medium">{timeRangeLabel}</span>
 	</div>
 
 	<!-- Right section: Actions -->
@@ -161,7 +134,7 @@
 			class="rounded-md p-2 hover:bg-secondary"
 			title="Toggle log viewer"
 		>
-			<PanelRight class="h-5 w-5" />
+			<ScrollText class="h-5 w-5" />
 		</button>
 	</div>
 </header>

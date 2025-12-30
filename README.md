@@ -88,7 +88,7 @@ TSFlow supports OAuth (recommended) or API key authentication.
 |----------|-------------|---------|
 | `TSFLOW_DB_PATH` | SQLite database path | `./data/tsflow.db` |
 | `TSFLOW_POLL_INTERVAL` | How often to poll Tailscale API for new logs | `5m` |
-| `TSFLOW_INITIAL_BACKFILL` | How far back to fetch logs on startup | `1h` |
+| `TSFLOW_INITIAL_BACKFILL` | How far back to fetch logs on startup | `6h` |
 | `TSFLOW_RETENTION` | How long to keep flow logs | `168h` (7 days) |
 
 ### Data Storage

@@ -8,7 +8,8 @@ import { dataSourceStore } from './data-source-store';
 
 // Raw data stores
 export const devices = writable<Device[]>([]);
-export const networkLogs = writable<NetworkLog[]>([]);
+export const networkLogs = writable<NetworkLog[]>([]); // Used for graph (aggregated in historical mode)
+export const rawLogs = writable<NetworkLog[]>([]); // Used for LogViewer (always full detail with ports)
 export const services = writable<Record<string, { name: string; addrs: string[] }>>({});
 export const records = writable<Record<string, { addrs: string[]; comment?: string }>>({});
 
@@ -210,20 +211,25 @@ export async function loadNetworkData() {
 		]);
 
 		// Fetch logs based on mode
-		let logs;
+		let graphLogs;
+		let viewerLogs;
 		if (dataSource.mode === 'historical') {
-			// Fetch aggregated flows from stored database (scalable, no limits)
+			// Fetch aggregated flows for graph (fast, node-level)
 			const aggregatedData = await tailscaleService.getAggregatedFlows(start, end);
-			// Convert aggregated flows to NetworkLog format for graph
-			logs = convertAggregatedFlowsToNetworkLogs(aggregatedData.flows || []);
+			graphLogs = convertAggregatedFlowsToNetworkLogs(aggregatedData.flows || [], start, end);
+			// Fetch raw logs for LogViewer (full detail with ports)
+			const storedLogs = await tailscaleService.getStoredFlowLogs(start, end);
+			viewerLogs = convertStoredLogsToNetworkLogs(storedLogs.logs || []);
 		} else {
-			// Fetch live from Tailscale API
+			// Fetch live from Tailscale API - same data for both
 			const logsData = await tailscaleService.getNetworkLogs(start, end);
-			logs = logsData.logs || [];
+			graphLogs = logsData.logs || [];
+			viewerLogs = graphLogs;
 		}
 
 		devices.set(devicesData);
-		networkLogs.set(logs);
+		networkLogs.set(graphLogs); // For graph visualization
+		rawLogs.set(viewerLogs); // For LogViewer with full detail
 		services.set(servicesData.services || {});
 		records.set(servicesData.records || {});
 	} catch (err) {
@@ -306,7 +312,7 @@ function convertStoredLogsToNetworkLogs(storedLogs: any[]): NetworkLog[] {
 
 // Convert pre-aggregated node-pair flows to NetworkLog format for the graph
 // The backend now returns srcNodeId/dstNodeId (device IDs or IPs for external nodes)
-function convertAggregatedFlowsToNetworkLogs(flows: AggregatedFlow[]): NetworkLog[] {
+function convertAggregatedFlowsToNetworkLogs(flows: AggregatedFlow[], rangeStart: Date, rangeEnd: Date): NetworkLog[] {
 	// Group by srcNodeId to create NetworkLog entries
 	const grouped = new Map<string, AggregatedFlow[]>();
 
@@ -320,16 +326,17 @@ function convertAggregatedFlowsToNetworkLogs(flows: AggregatedFlow[]): NetworkLo
 	}
 
 	const networkLogs: NetworkLog[] = [];
-	const now = new Date().toISOString();
+	const startISO = rangeStart.toISOString();
+	const endISO = rangeEnd.toISOString();
 
 	for (const [nodeId, nodeFlows] of grouped) {
 		if (nodeFlows.length === 0) continue;
 
 		const networkLog: NetworkLog = {
-			logged: now,
+			logged: endISO,
 			nodeId: nodeId,
-			start: now,
-			end: now,
+			start: startISO,
+			end: endISO,
 			virtualTraffic: [],
 			subnetTraffic: [],
 			physicalTraffic: []

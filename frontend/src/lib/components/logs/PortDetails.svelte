@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { uiStore, filteredNodes, networkLogs } from '$lib/stores';
+	import { uiStore, filteredNodes, rawLogs } from '$lib/stores';
 	import { formatBytes, extractIP, getProtocolName } from '$lib/utils';
 	import type { NetworkLog } from '$lib/types';
 
@@ -55,7 +55,7 @@
 		const nodeIPs = new Set(selectedNode.ips);
 		const portMap = new Map<string, PortStat>();
 
-		$networkLogs.forEach((log: NetworkLog) => {
+		$rawLogs.forEach((log: NetworkLog) => {
 			const allTraffic = [
 				...(log.virtualTraffic || []),
 				...(log.subnetTraffic || [])

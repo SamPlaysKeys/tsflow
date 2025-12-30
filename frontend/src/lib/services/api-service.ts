@@ -25,7 +25,11 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 		throw new APIError(response.status, `HTTP ${response.status}: ${response.statusText}`);
 	}
 
-	return response.json();
+	try {
+		return await response.json();
+	} catch {
+		throw new APIError(response.status, 'Invalid JSON response from server');
+	}
 }
 
 export const api = {

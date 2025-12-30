@@ -101,7 +101,11 @@
 		}
 
 		const times = chartData.map((d) => d.time.getTime());
-		const maxBytes = Math.max(...chartData.map((d) => Math.max(d.txBytes, d.rxBytes)), 1);
+		// For network total (no node selected), only use txBytes since rxBytes is 0
+		// For per-node view, use both tx and rx
+		const maxBytes = selectedNodeName
+			? Math.max(...chartData.map((d) => Math.max(d.txBytes, d.rxBytes)), 1)
+			: Math.max(...chartData.map((d) => d.txBytes), 1);
 
 		return {
 			minTime: Math.min(...times),
@@ -271,7 +275,7 @@
 				{#if selectedNodeName}
 					<span class="text-primary">{selectedNodeName}</span> Bandwidth
 				{:else}
-					Bandwidth Over Time
+					Network Throughput
 				{/if}
 				{#if $dataSourceStore.mode === 'live'}
 					<span class="text-primary/70">
@@ -284,20 +288,29 @@
 				{/if}
 			</span>
 			<div class="flex items-center gap-3 text-xs">
-				<span class="flex items-center gap-1">
-					<span class="h-2 w-2 rounded-full bg-blue-500"></span>
-					TX: {formatBytes(totals.tx)}
-				</span>
-				<span class="flex items-center gap-1">
-					<span class="h-2 w-2 rounded-full bg-emerald-500"></span>
-					RX: {formatBytes(totals.rx)}
-				</span>
-				<span class="text-muted-foreground">
-					Total: {formatBytes(totals.total)}
-				</span>
+				{#if selectedNodeName}
+					<!-- Per-node view: show TX/RX separately -->
+					<span class="flex items-center gap-1">
+						<span class="h-2 w-2 rounded-full bg-blue-500"></span>
+						TX: {formatBytes(totals.tx)}
+					</span>
+					<span class="flex items-center gap-1">
+						<span class="h-2 w-2 rounded-full bg-emerald-500"></span>
+						RX: {formatBytes(totals.rx)}
+					</span>
+					<span class="text-muted-foreground">
+						Total: {formatBytes(totals.total)}
+					</span>
+				{:else}
+					<!-- Network total view: show single throughput value -->
+					<span class="flex items-center gap-1">
+						<span class="h-2 w-2 rounded-full bg-blue-500"></span>
+						{formatBytes(totals.tx)}
+					</span>
+				{/if}
 				{#if isShowingSubset}
 					<span class="text-muted-foreground/60">
-						| All: {formatBytes(fullTotals.total)}
+						| All: {formatBytes(fullTotals.tx)}
 					</span>
 				{/if}
 			</div>
@@ -330,13 +343,20 @@
 				{/each}
 			</g>
 
-			<!-- RX area (behind) -->
-			<path d={rxArea} fill="rgb(16, 185, 129)" fill-opacity="0.15" />
-			<path d={rxPath} fill="none" stroke="rgb(16, 185, 129)" stroke-width="1.5" />
+			{#if selectedNodeName}
+				<!-- Per-node view: show both TX and RX lines -->
+				<!-- RX area (behind) -->
+				<path d={rxArea} fill="rgb(16, 185, 129)" fill-opacity="0.15" />
+				<path d={rxPath} fill="none" stroke="rgb(16, 185, 129)" stroke-width="1.5" />
 
-			<!-- TX area (front) -->
-			<path d={txArea} fill="rgb(59, 130, 246)" fill-opacity="0.15" />
-			<path d={txPath} fill="none" stroke="rgb(59, 130, 246)" stroke-width="1.5" />
+				<!-- TX area (front) -->
+				<path d={txArea} fill="rgb(59, 130, 246)" fill-opacity="0.15" />
+				<path d={txPath} fill="none" stroke="rgb(59, 130, 246)" stroke-width="1.5" />
+			{:else}
+				<!-- Network total view: show single throughput line -->
+				<path d={txArea} fill="rgb(59, 130, 246)" fill-opacity="0.15" />
+				<path d={txPath} fill="none" stroke="rgb(59, 130, 246)" stroke-width="1.5" />
+			{/if}
 
 			<!-- Selected range indicator (historical mode) -->
 			{#if selectedRangeX !== null}

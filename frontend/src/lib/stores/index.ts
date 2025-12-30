@@ -11,6 +11,7 @@ export {
 	networkStore,
 	devices,
 	networkLogs,
+	rawLogs,
 	services,
 	records,
 	processedNetwork,

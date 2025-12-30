@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { networkLogs, uiStore, filteredNodes, filteredEdges, filterStore, devices, primaryMatchedNodes } from '$lib/stores';
+	import { rawLogs, uiStore, filteredNodes, filteredEdges, filterStore, devices, services, primaryMatchedNodes } from '$lib/stores';
 	import { formatBytes, formatDate, extractIP, getProtocolName } from '$lib/utils';
 	import { ArrowRight } from 'lucide-svelte';
 	import type { NetworkLog } from '$lib/types';
@@ -26,16 +26,35 @@
 		return map;
 	});
 
-	// Helper to resolve IP or device ID to device name
-	function resolveIP(address: string): { ip: string; deviceName?: string } {
+	// Build service IP to service name lookup map
+	const ipToService = $derived.by(() => {
+		const map = new Map<string, string>();
+		for (const [, service] of Object.entries($services)) {
+			const displayName = service.name.replace(/^svc:/, '');
+			for (const addr of service.addrs || []) {
+				map.set(addr, displayName);
+			}
+		}
+		return map;
+	});
+
+	// Helper to resolve IP or device ID to device/service name
+	function resolveIP(address: string): { ip: string; port?: string; deviceName?: string } {
 		const ip = extractIP(address);
-		// First try IP lookup
+		// Extract port if present
+		const portMatch = address.match(/:(\d+)$/);
+		const port = portMatch ? portMatch[1] : undefined;
+		// First try device IP lookup
 		let deviceName = ipToDevice.get(ip);
 		// If no match, try device ID lookup (for aggregated flows)
 		if (!deviceName) {
 			deviceName = deviceIdToName.get(ip);
 		}
-		return { ip, deviceName };
+		// If still no match, try service lookup
+		if (!deviceName) {
+			deviceName = ipToService.get(ip);
+		}
+		return { ip, port, deviceName };
 	}
 
 	// Flatten traffic entries for display
@@ -65,7 +84,7 @@
 		const selectedNodeId = $uiStore.selectedNodeId;
 		const selectedEdgeId = $uiStore.selectedEdgeId;
 		const searchQuery = $filterStore.search;
-		const logs = $networkLogs;
+		const logs = $rawLogs;
 
 		// No filters active - show recent logs
 		if (!selectedNodeId && !selectedEdgeId && !searchQuery) {
@@ -284,19 +303,19 @@
 						</td>
 						<td class="px-2 py-1">
 							<div class="flex items-center gap-1">
-								<span class="truncate" title={srcResolved.deviceName ? `${srcResolved.deviceName} (${srcResolved.ip})` : srcResolved.ip}>
+								<span class="truncate" title={srcResolved.deviceName ? `${srcResolved.deviceName} (${srcResolved.ip}${srcResolved.port ? ':' + srcResolved.port : ''})` : entry.src}>
 									{#if srcResolved.deviceName}
-										<span class="text-primary">{srcResolved.deviceName}</span>
+										<span class="text-primary">{srcResolved.deviceName}</span>{#if srcResolved.port}<span class="text-muted-foreground">:{srcResolved.port}</span>{/if}
 									{:else}
-										{srcResolved.ip}
+										{entry.src}
 									{/if}
 								</span>
 								<ArrowRight class="h-3 w-3 shrink-0 text-muted-foreground" />
-								<span class="truncate" title={dstResolved.deviceName ? `${dstResolved.deviceName} (${dstResolved.ip})` : dstResolved.ip}>
+								<span class="truncate" title={dstResolved.deviceName ? `${dstResolved.deviceName} (${dstResolved.ip}${dstResolved.port ? ':' + dstResolved.port : ''})` : entry.dst}>
 									{#if dstResolved.deviceName}
-										<span class="text-primary">{dstResolved.deviceName}</span>
+										<span class="text-primary">{dstResolved.deviceName}</span>{#if dstResolved.port}<span class="text-muted-foreground">:{dstResolved.port}</span>{/if}
 									{:else}
-										{dstResolved.ip}
+										{entry.dst}
 									{/if}
 								</span>
 							</div>

@@ -95,7 +95,8 @@
 		if (!dragging || !sliderTrack) return;
 
 		const rect = sliderTrack.getBoundingClientRect();
-		const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+		// Guard against empty touches array (shouldn't happen for touchmove, but be safe)
+		const clientX = 'touches' in e && e.touches.length > 0 ? e.touches[0].clientX : (e as MouseEvent).clientX;
 		let value = ((clientX - rect.left) / rect.width) * 100;
 		value = Math.max(0, Math.min(100, value));
 
