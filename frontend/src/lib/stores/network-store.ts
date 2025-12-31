@@ -10,7 +10,7 @@ import { dataSourceStore } from './data-source-store';
 export const devices = writable<Device[]>([]);
 export const networkLogs = writable<NetworkLog[]>([]); // Used for graph (aggregated in historical mode)
 export const rawLogs = writable<NetworkLog[]>([]); // Used for LogViewer (always full detail with ports)
-export const services = writable<Record<string, { name: string; addrs: string[] }>>({});
+export const services = writable<Record<string, { name: string; addrs: string[]; tags?: string[] }>>({});
 export const records = writable<Record<string, { addrs: string[]; comment?: string }>>({});
 
 // Processed network data

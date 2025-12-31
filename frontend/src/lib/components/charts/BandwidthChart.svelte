@@ -16,21 +16,27 @@
 	let chartData = $state<{ time: Date; txBytes: number; rxBytes: number }[]>([]);
 	let isLoading = $state(false);
 
-	// Get IPs of selected node (if any)
-	const selectedNodeIPs = $derived.by(() => {
+	// Get selected node and its device ID for bandwidth queries
+	const selectedNode = $derived.by(() => {
 		const selectedId = $uiStore.selectedNodeId;
 		if (!selectedId) return null;
-		const node = $filteredNodes.find((n) => n.id === selectedId);
-		return node?.ips || null;
+		return $filteredNodes.find((n) => n.id === selectedId) || null;
+	});
+
+	// Get the node identifier for bandwidth API queries
+	// Priority: device.id (for Tailscale devices) > node's primary IP (for external/subnet nodes)
+	const selectedDeviceId = $derived.by(() => {
+		if (!selectedNode) return null;
+		// For Tailscale devices, use the numeric device ID
+		if (selectedNode.device?.id) return selectedNode.device.id;
+		// For external/subnet nodes, use the IP (which is how they're stored in DB)
+		if (selectedNode.ip) return selectedNode.ip;
+		// Fallback to node.id (might be an IP for external nodes)
+		return selectedNode.id;
 	});
 
 	// Selected node name for display
-	const selectedNodeName = $derived.by(() => {
-		const selectedId = $uiStore.selectedNodeId;
-		if (!selectedId) return null;
-		const node = $filteredNodes.find((n) => n.id === selectedId);
-		return node?.displayName || null;
-	});
+	const selectedNodeName = $derived(selectedNode?.displayName || null);
 
 	$effect(() => {
 		if (container) {
@@ -66,19 +72,19 @@
 	$effect(() => {
 		const dataRange = $dataSourceStore.dataRange;
 		const mode = $dataSourceStore.mode;
-		const nodeIPs = selectedNodeIPs;
+		const deviceId = selectedDeviceId;
 
 		if (dataRange?.earliest && dataRange?.latest) {
 			// Always fetch full available range (same behavior for live and historical)
-			fetchBandwidth(new Date(dataRange.earliest), new Date(dataRange.latest), nodeIPs);
+			fetchBandwidth(new Date(dataRange.earliest), new Date(dataRange.latest), deviceId);
 		}
 	});
 
-	async function fetchBandwidth(start: Date, end: Date, ips: string[] | null) {
+	async function fetchBandwidth(start: Date, end: Date, nodeId: string | null) {
 		isLoading = true;
 		try {
 			// Let backend decide optimal bucket size based on time range
-			const response = await tailscaleService.getBandwidth(start, end, ips || undefined);
+			const response = await tailscaleService.getBandwidth(start, end, nodeId || undefined);
 			chartData = (response.buckets || [])
 				.map((b) => ({
 					time: new Date(b.time),

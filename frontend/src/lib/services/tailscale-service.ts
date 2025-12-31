@@ -85,8 +85,18 @@ export interface PollerStatus {
 	pollErrors: number;
 	pollInterval: string;
 	database?: {
-		totalLogs: number;
-		byTrafficType: Record<string, number>;
+		tableCounts?: {
+			flow_logs_current?: number;
+			node_pairs_minutely?: number;
+			node_pairs_hourly?: number;
+			node_pairs_daily?: number;
+			bandwidth_minutely?: number;
+			bandwidth_hourly?: number;
+			bandwidth_daily?: number;
+			bandwidth_by_node_minutely?: number;
+			bandwidth_by_node_hourly?: number;
+			bandwidth_by_node_daily?: number;
+		};
 		dbSizeBytes: number;
 		dataRange: DataRange;
 	};

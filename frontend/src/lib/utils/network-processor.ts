@@ -5,6 +5,7 @@ import { getProtocolName } from './protocol';
 interface VIPServiceInfo {
 	name: string;
 	addrs: string[];
+	tags?: string[];
 }
 
 interface StaticRecordInfo {
@@ -84,6 +85,20 @@ function getDeviceData(ipOrId: string, devices: Device[] = []): Device | null {
 	return devices.find((d) => d.addresses.some((addr) => ipMatches(ip, addr))) || null;
 }
 
+// Get service data from IP
+function getServiceData(
+	ipOrId: string,
+	services: Record<string, VIPServiceInfo> = {}
+): VIPServiceInfo | null {
+	const ip = extractIP(ipOrId);
+	for (const serviceInfo of Object.values(services)) {
+		if (serviceInfo.addrs?.some((addr) => ipMatches(ip, addr))) {
+			return serviceInfo;
+		}
+	}
+	return null;
+}
+
 // Get the IP from either IP:port format or device ID
 function resolveToIP(ipOrId: string, devices: Device[] = []): string {
 	// If it's already an IP, extract it
@@ -136,9 +151,11 @@ export function processNetworkLogs(
 			if (!nodeMap.has(srcNodeId)) {
 				const isTailscale = categorizeIP(srcIP).includes('tailscale');
 				const deviceData = getDeviceData(traffic.src, devices);
+				const serviceData = getServiceData(traffic.src, services);
 				const ipTags = categorizeIP(srcIP);
 				const deviceTags = deviceData?.tags || [];
-				const allTags = [...new Set([...ipTags, ...deviceTags])];
+				const serviceTags = serviceData?.tags || [];
+				const allTags = [...new Set([...ipTags, ...deviceTags, ...serviceTags])];
 
 				nodeMap.set(srcNodeId, {
 					id: srcNodeId,
@@ -164,8 +181,10 @@ export function processNetworkLogs(
 					existingNode.ips.push(srcIP);
 					const newTags = categorizeIP(srcIP);
 					const deviceData = getDeviceData(traffic.src, devices);
+					const serviceData = getServiceData(traffic.src, services);
 					const deviceTags = deviceData?.tags || [];
-					[...newTags, ...deviceTags].forEach((tag) => {
+					const serviceTags = serviceData?.tags || [];
+					[...newTags, ...deviceTags, ...serviceTags].forEach((tag) => {
 						if (!existingNode.tags.includes(tag)) {
 							existingNode.tags.push(tag);
 						}
@@ -183,9 +202,11 @@ export function processNetworkLogs(
 			if (!nodeMap.has(dstNodeId)) {
 				const isTailscale = categorizeIP(dstIP).includes('tailscale');
 				const deviceData = getDeviceData(traffic.dst, devices);
+				const serviceData = getServiceData(traffic.dst, services);
 				const ipTags = categorizeIP(dstIP);
 				const deviceTags = deviceData?.tags || [];
-				const allTags = [...new Set([...ipTags, ...deviceTags])];
+				const serviceTags = serviceData?.tags || [];
+				const allTags = [...new Set([...ipTags, ...deviceTags, ...serviceTags])];
 
 				nodeMap.set(dstNodeId, {
 					id: dstNodeId,
@@ -211,8 +232,10 @@ export function processNetworkLogs(
 					existingNode.ips.push(dstIP);
 					const newTags = categorizeIP(dstIP);
 					const deviceData = getDeviceData(traffic.dst, devices);
+					const serviceData = getServiceData(traffic.dst, services);
 					const deviceTags = deviceData?.tags || [];
-					[...newTags, ...deviceTags].forEach((tag) => {
+					const serviceTags = serviceData?.tags || [];
+					[...newTags, ...deviceTags, ...serviceTags].forEach((tag) => {
 						if (!existingNode.tags.includes(tag)) {
 							existingNode.tags.push(tag);
 						}
@@ -240,12 +263,19 @@ export function processNetworkLogs(
 			srcNode.protocols.add(protocolName);
 			dstNode.protocols.add(protocolName);
 
-			if (traffic.proto === 6 || traffic.proto === 17) {
-				const srcPort = extractPort(traffic.src);
+			// Only track ports for virtual and subnet traffic (not physical)
+			// Physical traffic represents underlying transport (DERP, direct) with different port semantics
+			// This matches Port Usage panel which only analyzes virtual/subnet traffic
+			if (traffic.type !== 'physical' && (traffic.proto === 6 || traffic.proto === 17)) {
 				const dstPort = extractPort(traffic.dst);
 
-				if (srcPort !== null) srcNode.outgoingPorts.add(srcPort);
-				if (dstPort !== null) dstNode.incomingPorts.add(dstPort);
+				// Add destination port to BOTH nodes - both are "involved" in this flow
+				// This matches Port Usage panel which counts destination ports for all traffic
+				// involving a node (whether as source or destination)
+				if (dstPort !== null) {
+					srcNode.incomingPorts.add(dstPort);
+					dstNode.incomingPorts.add(dstPort);
+				}
 			}
 
 			// Create or update link - use bidirectional key to combine A->B and B->A

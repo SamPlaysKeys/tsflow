@@ -591,6 +591,7 @@ func (ts *TailscaleService) GetDNSNameservers() (map[string]interface{}, error) 
 type VIPServiceInfo struct {
 	Name  string   `json:"name"`
 	Addrs []string `json:"addrs"`
+	Tags  []string `json:"tags,omitempty"`
 }
 
 // StaticRecordInfo represents a static DNS record

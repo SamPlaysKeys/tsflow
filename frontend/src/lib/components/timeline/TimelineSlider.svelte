@@ -237,7 +237,7 @@
 		<div class="space-y-1 text-xs text-muted-foreground">
 			<div class="flex justify-between">
 				<span>Stored Logs:</span>
-				<span class="font-mono">{pollerStatus.database?.totalLogs?.toLocaleString() || 0}</span>
+				<span class="font-mono">{pollerStatus.database?.tableCounts?.flow_logs_current?.toLocaleString() || 0}</span>
 			</div>
 			{#if pollerStatus.lastPollTime}
 				<div class="flex justify-between">

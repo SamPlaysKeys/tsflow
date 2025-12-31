@@ -53,12 +53,11 @@
 			.slice(0, 3)
 	);
 
-	// Process ports - combine incoming and outgoing, show well-known first
+	// Process ports - only show destination/service ports (not ephemeral source ports)
 	const displayPorts = $derived.by(() => {
-		const allPorts = new Set([
-			...(data.incomingPorts || []),
-			...(data.outgoingPorts || [])
-		]);
+		// Only use incomingPorts (destination ports) - these represent services being accessed
+		// outgoingPorts are ephemeral source ports and not meaningful to display
+		const allPorts = new Set([...(data.incomingPorts || [])]);
 		const portsArray = Array.from(allPorts).sort((a, b) => a - b);
 
 		// Separate well-known from high ports

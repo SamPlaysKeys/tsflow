@@ -697,9 +697,6 @@ func (p *Poller) cleanup(ctx context.Context) error {
 	return nil
 }
 
-// Maximum number of flow logs to process in a single batch (prevent memory exhaustion)
-const maxFlowLogsPerBatch = 100000
-
 // convertLogs converts Tailscale API response to database FlowLog entries
 func (p *Poller) convertLogs(logsResp interface{}) []database.FlowLog {
 	var flowLogs []database.FlowLog
@@ -718,10 +715,6 @@ func (p *Poller) convertLogs(logsResp interface{}) []database.FlowLog {
 	if tsLogs, ok := logs.([]tailscale.NetworkFlowLog); ok {
 		for _, tsLog := range tsLogs {
 			flowLogs = append(flowLogs, p.convertTailscaleLog(tsLog)...)
-			if len(flowLogs) >= maxFlowLogsPerBatch {
-				log.Printf("Warning: truncating flow logs at %d entries", maxFlowLogsPerBatch)
-				return flowLogs[:maxFlowLogsPerBatch]
-			}
 		}
 		return flowLogs
 	}
@@ -731,10 +724,6 @@ func (p *Poller) convertLogs(logsResp interface{}) []database.FlowLog {
 		for _, logItem := range logsArray {
 			if logMap, ok := logItem.(map[string]interface{}); ok {
 				flowLogs = append(flowLogs, p.convertMapLog(logMap)...)
-				if len(flowLogs) >= maxFlowLogsPerBatch {
-					log.Printf("Warning: truncating flow logs at %d entries", maxFlowLogsPerBatch)
-					return flowLogs[:maxFlowLogsPerBatch]
-				}
 			}
 		}
 	}

@@ -49,8 +49,9 @@
 		connections: number;
 	}
 
-	const portStats = $derived.by(() => {
-		if (!selectedNode) return [];
+	// Store the full port count separately from the display-limited list
+	const portData = $derived.by(() => {
+		if (!selectedNode) return { stats: [], totalCount: 0 };
 
 		const nodeIPs = new Set(selectedNode.ips);
 		const portMap = new Map<string, PortStat>();
@@ -94,11 +95,17 @@
 			});
 		});
 
-		// Sort by total bytes descending
-		return Array.from(portMap.values())
-			.sort((a, b) => (b.txBytes + b.rxBytes) - (a.txBytes + a.rxBytes))
-			.slice(0, 20); // Top 20 ports
+		const allPorts = Array.from(portMap.values())
+			.sort((a, b) => (b.txBytes + b.rxBytes) - (a.txBytes + a.rxBytes));
+
+		return {
+			stats: allPorts.slice(0, 20), // Top 20 ports for display
+			totalCount: allPorts.length    // True total count
+		};
 	});
+
+	const portStats = $derived(portData.stats);
+	const totalPortCount = $derived(portData.totalCount);
 
 	const totalTraffic = $derived.by(() => {
 		const tx = portStats.reduce((sum, p) => sum + p.txBytes, 0);
@@ -112,7 +119,7 @@
 		<div class="border-b border-border p-3">
 			<h2 class="text-sm font-semibold">Port Usage</h2>
 			<p class="text-xs text-muted-foreground">
-				{selectedNode.displayName} - {portStats.length} active ports
+				{selectedNode.displayName} - {totalPortCount} active ports{totalPortCount > 20 ? ' (showing top 20)' : ''}
 				<span class="ml-2">
 					TX: {formatBytes(totalTraffic.tx)} | RX: {formatBytes(totalTraffic.rx)}
 				</span>
