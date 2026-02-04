@@ -2,8 +2,8 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -234,7 +234,7 @@ func (c *RollingWindowCache) GetNodePairs(start, end time.Time) []database.NodeP
 	return result
 }
 
-// GetBandwidth returns cached bandwidth for a time range
+// GetBandwidth returns cached bandwidth for a time range (sorted by time)
 func (c *RollingWindowCache) GetBandwidth(start, end time.Time) []database.BandwidthBucket {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -249,10 +249,15 @@ func (c *RollingWindowCache) GetBandwidth(start, end time.Time) []database.Bandw
 		}
 	}
 
+	// Sort by time ascending
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Time.Before(result[j].Time)
+	})
+
 	return result
 }
 
-// GetNodeBandwidth returns cached bandwidth for a specific node
+// GetNodeBandwidth returns cached bandwidth for a specific node (sorted by time)
 func (c *RollingWindowCache) GetNodeBandwidth(start, end time.Time, nodeID string) []database.BandwidthBucket {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -273,6 +278,11 @@ func (c *RollingWindowCache) GetNodeBandwidth(start, end time.Time, nodeID strin
 		}
 	}
 
+	// Sort by time ascending
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Time.Before(result[j].Time)
+	})
+
 	return result
 }
 
@@ -280,6 +290,11 @@ func (c *RollingWindowCache) GetNodeBandwidth(start, end time.Time, nodeID strin
 func (c *RollingWindowCache) HasDataFor(start, end time.Time) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
+	// Check if we have any data at all
+	if len(c.bandwidth) == 0 && len(c.nodePairs) == 0 {
+		return false
+	}
 
 	// Check if the range is within our cache window
 	cacheStart := time.Now().Add(-c.maxAge)
@@ -374,11 +389,11 @@ func (p *Poller) Stop() {
 }
 
 // Stats returns current poller statistics
-func (p *Poller) Stats() map[string]interface{} {
+func (p *Poller) Stats() map[string]any {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	return map[string]interface{}{
+	return map[string]any{
 		"running":       p.running,
 		"lastPollTime":  p.lastPollTime,
 		"lastPollCount": p.lastPollCount,
@@ -399,7 +414,13 @@ func (p *Poller) GetRollingCache() *RollingWindowCache {
 }
 
 func (p *Poller) run(ctx context.Context) {
-	defer close(p.doneChan)
+	// Capture channels at start to avoid race with Stop() setting them to nil
+	p.mu.RLock()
+	stopChan := p.stopChan
+	doneChan := p.doneChan
+	p.mu.RUnlock()
+
+	defer close(doneChan)
 
 	pollTicker := time.NewTicker(p.config.PollInterval)
 	defer pollTicker.Stop()
@@ -411,7 +432,7 @@ func (p *Poller) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-p.stopChan:
+		case <-stopChan:
 			return
 		case <-pollTicker.C:
 			// Refresh device cache if stale
@@ -435,7 +456,7 @@ func (p *Poller) run(ctx context.Context) {
 	}
 }
 
-func (p *Poller) refreshDeviceCache(ctx context.Context) error {
+func (p *Poller) refreshDeviceCache(_ context.Context) error {
 	devicesResp, err := p.tsService.GetDevices()
 	if err != nil {
 		return err
@@ -487,7 +508,7 @@ func (p *Poller) poll(ctx context.Context) error {
 	}
 
 	// Pre-aggregate at poll time: node pairs and bandwidth
-	nodePairs, totalBandwidth, nodeBandwidth := p.aggregate(flowLogs, start)
+	nodePairs, totalBandwidth, nodeBandwidth := p.aggregate(flowLogs)
 
 	// Store aggregates
 	if len(nodePairs) > 0 {
@@ -536,7 +557,7 @@ func (p *Poller) poll(ctx context.Context) error {
 // Handles deduplication: Tailscale logs the same traffic from both endpoints
 // (A→B logged by A, B→A logged by B). We normalize pairs by sorting node IDs
 // and use TX-only for bandwidth since RX duplicates the reverse direction's TX.
-func (p *Poller) aggregate(logs []database.FlowLog, baseTime time.Time) (
+func (p *Poller) aggregate(logs []database.FlowLog) (
 	[]database.NodePairAggregate,
 	[]database.BandwidthBucket,
 	[]database.NodeBandwidth,
@@ -698,10 +719,10 @@ func (p *Poller) cleanup(ctx context.Context) error {
 }
 
 // convertLogs converts Tailscale API response to database FlowLog entries
-func (p *Poller) convertLogs(logsResp interface{}) []database.FlowLog {
+func (p *Poller) convertLogs(logsResp any) []database.FlowLog {
 	var flowLogs []database.FlowLog
 
-	logsMap, ok := logsResp.(map[string]interface{})
+	logsMap, ok := logsResp.(map[string]any)
 	if !ok {
 		return flowLogs
 	}
@@ -719,10 +740,10 @@ func (p *Poller) convertLogs(logsResp interface{}) []database.FlowLog {
 		return flowLogs
 	}
 
-	// Handle []interface{} (generic JSON)
-	if logsArray, ok := logs.([]interface{}); ok {
+	// Handle []any (generic JSON)
+	if logsArray, ok := logs.([]any); ok {
 		for _, logItem := range logsArray {
-			if logMap, ok := logItem.(map[string]interface{}); ok {
+			if logMap, ok := logItem.(map[string]any); ok {
 				flowLogs = append(flowLogs, p.convertMapLog(logMap)...)
 			}
 		}
@@ -791,18 +812,26 @@ func (p *Poller) convertTailscaleLog(tsLog tailscale.NetworkFlowLog) []database.
 	return flowLogs
 }
 
-func (p *Poller) convertMapLog(logMap map[string]interface{}) []database.FlowLog {
+func (p *Poller) convertMapLog(logMap map[string]any) []database.FlowLog {
 	var flowLogs []database.FlowLog
 
-	nodeID, _ := logMap["nodeId"].(string)
-	logged, _ := time.Parse(time.RFC3339, getString(logMap, "logged"))
+	nodeID, ok := logMap["nodeId"].(string)
+	if !ok {
+		log.Printf("Warning: skipping log entry with invalid nodeId type: %T", logMap["nodeId"])
+		return flowLogs
+	}
+	logged, err := time.Parse(time.RFC3339, getString(logMap, "logged"))
+	if err != nil {
+		log.Printf("Warning: skipping log entry with invalid logged timestamp for node %s", nodeID)
+		return flowLogs
+	}
 
 	// Process each traffic type
 	for _, trafficType := range []string{"virtualTraffic", "subnetTraffic", "physicalTraffic"} {
-		if traffic, ok := logMap[trafficType].([]interface{}); ok {
+		if traffic, ok := logMap[trafficType].([]any); ok {
 			typeName := strings.TrimSuffix(trafficType, "Traffic")
 			for _, t := range traffic {
-				if tMap, ok := t.(map[string]interface{}); ok {
+				if tMap, ok := t.(map[string]any); ok {
 					flowLogs = append(flowLogs, database.FlowLog{
 						LoggedAt:    logged,
 						NodeID:      nodeID,
@@ -876,32 +905,33 @@ func parsePort(s string, port *int) (bool, error) {
 	return *port > 0 && *port <= 65535, nil
 }
 
-func getString(m map[string]interface{}, key string) string {
+func getString(m map[string]any, key string) string {
 	if v, ok := m[key].(string); ok {
 		return v
 	}
 	return ""
 }
 
-func getInt(m map[string]interface{}, key string) int {
+func getInt(m map[string]any, key string) int {
 	if v, ok := m[key].(float64); ok {
+		// Validate float is within int range and not NaN/Inf
+		if v != v || v > float64(int(^uint(0)>>1)) || v < float64(-int(^uint(0)>>1)-1) {
+			return 0
+		}
 		return int(v)
 	}
 	return 0
 }
 
-func getInt64(m map[string]interface{}, key string) int64 {
+func getInt64(m map[string]any, key string) int64 {
 	if v, ok := m[key].(float64); ok {
+		// Validate float is within int64 range and not NaN/Inf
+		// Note: float64 can't exactly represent all int64 values, but this catches major issues
+		if v != v || v > float64(1<<63-1) || v < float64(-1<<63) {
+			return 0
+		}
 		return int64(v)
 	}
 	return 0
 }
 
-// MarshalJSON helper for protocols/ports
-func toJSON(v interface{}) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return "[]"
-	}
-	return string(b)
-}

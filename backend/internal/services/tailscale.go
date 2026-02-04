@@ -229,7 +229,7 @@ func (ts *TailscaleService) GetDevices() (*DevicesResponse, error) {
 	return &response, nil
 }
 
-func (ts *TailscaleService) GetNetworkLogs(start, end string) (interface{}, error) {
+func (ts *TailscaleService) GetNetworkLogs(start, end string) (any, error) {
 	// Parse time range to determine if we need chunking
 	startTime, err := time.Parse(time.RFC3339, start)
 	if err != nil {
@@ -265,17 +265,14 @@ func (ts *TailscaleService) GetNetworkLogs(start, end string) (interface{}, erro
 			return nil, fmt.Errorf("failed to fetch network logs from tailscale client: %w", err)
 		}
 
-		return map[string]interface{}{
+		return map[string]any{
 			"logs": logs,
 		}, nil
 	}
 	
 	// Fallback to old implementation
-	endpoint := fmt.Sprintf("/tailnet/%s/logging/network", ts.tailnet)
-
-	if start != "" && end != "" {
-		endpoint += fmt.Sprintf("?start=%s&end=%s", url.QueryEscape(start), url.QueryEscape(end))
-	}
+	endpoint := fmt.Sprintf("/tailnet/%s/logging/network?start=%s&end=%s",
+		ts.tailnet, url.QueryEscape(start), url.QueryEscape(end))
 
 	// Use much longer timeout for larger time ranges
 	timeoutDuration := 10 * time.Minute
@@ -290,26 +287,26 @@ func (ts *TailscaleService) GetNetworkLogs(start, end string) (interface{}, erro
 		return nil, fmt.Errorf("failed to fetch network logs: %w", err)
 	}
 
-	var response interface{}
+	var response any
 	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal network logs response: %w", err)
 	}
 
 	// Ensure consistent response format
-	if responseMap, ok := response.(map[string]interface{}); ok {
+	if responseMap, ok := response.(map[string]any); ok {
 		if logs, exists := responseMap["logs"]; exists {
-			return map[string]interface{}{
+			return map[string]any{
 				"logs": logs,
 			}, nil
 		}
 	}
-	return map[string]interface{}{
+	return map[string]any{
 		"logs": response,
 	}, nil
 }
 
 // GetNetworkLogsChunked retrieves network logs in chunks for large time ranges
-func (ts *TailscaleService) GetNetworkLogsChunked(start, end string, chunkSize time.Duration) ([]interface{}, error) {
+func (ts *TailscaleService) GetNetworkLogsChunked(start, end string, chunkSize time.Duration) ([]any, error) {
 	startTime, err := time.Parse(time.RFC3339, start)
 	if err != nil {
 		return nil, fmt.Errorf("invalid start time: %w", err)
@@ -326,11 +323,11 @@ func (ts *TailscaleService) GetNetworkLogsChunked(start, end string, chunkSize t
 		if err != nil {
 			return nil, err
 		}
-		return []interface{}{result}, nil
+		return []any{result}, nil
 	}
 
 	// Split the time range into chunks
-	var allLogs []interface{}
+	var allLogs []any
 	currentStart := startTime
 
 	for currentStart.Before(endTime) {
@@ -361,14 +358,14 @@ func (ts *TailscaleService) GetNetworkLogsChunked(start, end string, chunkSize t
 }
 
 // GetNetworkLogsChunkedParallel retrieves network logs in parallel chunks for large time ranges
-func (ts *TailscaleService) GetNetworkLogsChunkedParallel(start, end string, chunkSize time.Duration, maxConcurrency int) ([]interface{}, error) {
+func (ts *TailscaleService) GetNetworkLogsChunkedParallel(start, end string, chunkSize time.Duration, maxConcurrency int) ([]any, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	return ts.GetNetworkLogsChunkedParallelWithContext(ctx, start, end, chunkSize, maxConcurrency)
 }
 
 // GetNetworkLogsChunkedParallelWithContext retrieves network logs in parallel chunks with context support
-func (ts *TailscaleService) GetNetworkLogsChunkedParallelWithContext(ctx context.Context, start, end string, chunkSize time.Duration, maxConcurrency int) ([]interface{}, error) {
+func (ts *TailscaleService) GetNetworkLogsChunkedParallelWithContext(ctx context.Context, start, end string, chunkSize time.Duration, maxConcurrency int) ([]any, error) {
 	startTime, err := time.Parse(time.RFC3339, start)
 	if err != nil {
 		return nil, fmt.Errorf("invalid start time: %w", err)
@@ -398,13 +395,13 @@ func (ts *TailscaleService) GetNetworkLogsChunkedParallelWithContext(ctx context
 		if err != nil {
 			return nil, err
 		}
-		return []interface{}{result}, nil
+		return []any{result}, nil
 	}
 
 	// Channel for collecting results - buffered to prevent goroutine leaks
 	type result struct {
 		index int
-		logs  interface{}
+		logs  any
 		err   error
 	}
 	resultsChan := make(chan result, len(chunks))
@@ -475,7 +472,7 @@ func (ts *TailscaleService) GetNetworkLogsChunkedParallelWithContext(ctx context
 	}()
 
 	// Collect results
-	results := make([]interface{}, len(chunks))
+	results := make([]any, len(chunks))
 	var hasError bool
 
 	for res := range resultsChan {
@@ -496,7 +493,7 @@ func (ts *TailscaleService) GetNetworkLogsChunkedParallelWithContext(ctx context
 	}
 
 	// Filter out nil results and maintain order
-	var allLogs []interface{}
+	var allLogs []any
 	for _, logs := range results {
 		if logs != nil {
 			allLogs = append(allLogs, logs)
@@ -511,7 +508,7 @@ func (ts *TailscaleService) GetNetworkLogsChunkedParallelWithContext(ctx context
 }
 
 // GetNetworkMap retrieves the network map (simplified version)
-func (ts *TailscaleService) GetNetworkMap() (map[string]interface{}, error) {
+func (ts *TailscaleService) GetNetworkMap() (map[string]any, error) {
 	// Get devices as the basis for network map
 	devices, err := ts.GetDevices()
 	if err != nil {
@@ -519,7 +516,7 @@ func (ts *TailscaleService) GetNetworkMap() (map[string]interface{}, error) {
 	}
 
 	// Create a simplified network map
-	networkMap := map[string]interface{}{
+	networkMap := map[string]any{
 		"tailnet":       ts.tailnet,
 		"devices":       devices.Devices,
 		"total_devices": len(devices.Devices),
@@ -538,12 +535,12 @@ func (ts *TailscaleService) GetNetworkMap() (map[string]interface{}, error) {
 }
 
 // GetDeviceFlows retrieves flow data for a specific device
-func (ts *TailscaleService) GetDeviceFlows(deviceID string) (map[string]interface{}, error) {
+func (ts *TailscaleService) GetDeviceFlows(deviceID string) (map[string]any, error) {
 	return nil, fmt.Errorf("device flows API not implemented: Tailscale does not expose per-device flow data")
 }
 
 // GetDNSNameservers retrieves DNS config for the tailnet
-func (ts *TailscaleService) GetDNSNameservers() (map[string]interface{}, error) {
+func (ts *TailscaleService) GetDNSNameservers() (map[string]any, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -553,7 +550,7 @@ func (ts *TailscaleService) GetDNSNameservers() (map[string]interface{}, error) 
 		return nil, err
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal(nameserversBody, &result); err != nil {
 		return nil, err
 	}
@@ -561,7 +558,7 @@ func (ts *TailscaleService) GetDNSNameservers() (map[string]interface{}, error) 
 	// Get preferences
 	prefsBody, err := ts.makeRequest(ctx, fmt.Sprintf("/tailnet/%s/dns/preferences", ts.tailnet))
 	if err == nil {
-		var prefs map[string]interface{}
+		var prefs map[string]any
 		if json.Unmarshal(prefsBody, &prefs) == nil {
 			result["magicDNS"] = prefs["magicDNS"]
 			if domains, ok := prefs["searchDomains"]; ok {
@@ -579,8 +576,9 @@ func (ts *TailscaleService) GetDNSNameservers() (map[string]interface{}, error) 
 	}
 
 	// Show MagicDNS resolver when enabled
-	dns, _ := result["dns"].([]interface{})
-	if len(dns) == 0 && result["magicDNS"] == true {
+	dns, _ := result["dns"].([]any)
+	magicDNSEnabled, _ := result["magicDNS"].(bool)
+	if len(dns) == 0 && magicDNSEnabled {
 		result["dns"] = []string{"100.100.100.100"}
 	}
 

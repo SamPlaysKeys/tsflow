@@ -139,7 +139,11 @@ func main() {
 	router.Use(gzip.Gzip(gzip.DefaultCompression))
 
 	corsConfig := cors.DefaultConfig()
-	corsConfig.AllowAllOrigins = true
+	// Note: AllowAllOrigins=true with AllowCredentials=true is invalid per CORS spec
+	// Browsers reject this combination. Use AllowOriginFunc for dynamic origin handling.
+	corsConfig.AllowOriginFunc = func(origin string) bool {
+		return true // Allow all origins dynamically (compatible with credentials)
+	}
 	corsConfig.AllowCredentials = true
 	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
 	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization"}

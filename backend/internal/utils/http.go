@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,8 +12,8 @@ func IsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	
-	if err == context.DeadlineExceeded {
+
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return false
 	}
 	
@@ -34,18 +35,20 @@ func FormatTimeForAPI(t time.Time) string {
 func HTTPError(status int, body string) error {
 	switch status {
 	case 401:
-		return fmt.Errorf("bad auth - check your API key")
+		return fmt.Errorf("status 401: bad auth - check your API key")
 	case 403:
-		return fmt.Errorf("missing permissions (need logs:network:read)")
+		return fmt.Errorf("status 403: missing permissions (need logs:network:read)")
 	case 404:
-		return fmt.Errorf("tailnet not found")
+		return fmt.Errorf("status 404: tailnet not found")
 	case 429:
-		return fmt.Errorf("rate limited - slow down")
-	case 504:
-		return fmt.Errorf("timeout - try smaller time range")
+		return fmt.Errorf("status 429: rate limited - slow down")
+	case 502:
+		return fmt.Errorf("status 502: bad gateway")
 	case 503:
-		return fmt.Errorf("tailscale API down")
+		return fmt.Errorf("status 503: tailscale API down")
+	case 504:
+		return fmt.Errorf("status 504: timeout - try smaller time range")
 	default:
-		return fmt.Errorf("API error %d: %s", status, body)
+		return fmt.Errorf("status %d: %s", status, body)
 	}
 }

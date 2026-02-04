@@ -2,8 +2,11 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -148,10 +151,11 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 			return
 		}
 
-		var allLogs []interface{}
+		var allLogs []any
 
+	chunkLoop:
 		for _, chunk := range chunks {
-			if logsArray, ok := chunk.([]interface{}); ok {
+			if logsArray, ok := chunk.([]any); ok {
 				if len(allLogs)+len(logsArray) > MaxLogsInMemory {
 					remaining := MaxLogsInMemory - len(allLogs)
 					if remaining > 0 {
@@ -160,9 +164,9 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 					break
 				}
 				allLogs = append(allLogs, logsArray...)
-			} else if logsMap, ok := chunk.(map[string]interface{}); ok {
+			} else if logsMap, ok := chunk.(map[string]any); ok {
 				if logs, exists := logsMap["logs"]; exists {
-					if logsArray, ok := logs.([]interface{}); ok {
+					if logsArray, ok := logs.([]any); ok {
 						if len(allLogs)+len(logsArray) > MaxLogsInMemory {
 							remaining := MaxLogsInMemory - len(allLogs)
 							if remaining > 0 {
@@ -173,6 +177,9 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 						allLogs = append(allLogs, logsArray...)
 					} else if logsArray, ok := logs.([]tailscale.NetworkFlowLog); ok {
 						for _, log := range logsArray {
+							if len(allLogs) >= MaxLogsInMemory {
+								break chunkLoop
+							}
 							allLogs = append(allLogs, log)
 						}
 					}
@@ -183,11 +190,8 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 		// Sample logs if too many to prevent response size issues
 		finalLogs := allLogs
 		if len(allLogs) > MaxLogsInResponse {
-			sampleRate := len(allLogs) / MaxLogsInResponse
-			if sampleRate < 1 {
-				sampleRate = 1
-			}
-			sampledLogs := make([]interface{}, 0, MaxLogsInResponse)
+			sampleRate := max(len(allLogs)/MaxLogsInResponse, 1)
+			sampledLogs := make([]any, 0, MaxLogsInResponse)
 			for i := 0; i < len(allLogs); i += sampleRate {
 				sampledLogs = append(sampledLogs, allLogs[i])
 			}
@@ -234,9 +238,12 @@ func (h *Handlers) GetStoredFlowLogs(c *gin.Context) {
 	}
 
 	start := c.Query("start")
+	end := c.Query("end")
+	limitStr := c.Query("limit")
 
-	var startTime time.Time
+	var startTime, endTime time.Time
 	var err error
+	var limit int
 
 	if start == "" {
 		startTime = time.Now().Add(-10 * time.Minute)
@@ -248,10 +255,30 @@ func (h *Handlers) GetStoredFlowLogs(c *gin.Context) {
 		}
 	}
 
+	if end == "" {
+		endTime = time.Now()
+	} else {
+		endTime, err = time.Parse(time.RFC3339, end)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end time"})
+			return
+		}
+	}
+
+	if limitStr != "" {
+		if _, err := fmt.Sscanf(limitStr, "%d", &limit); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+			return
+		}
+	}
+	if limit <= 0 || limit > MaxLogsInResponse {
+		limit = MaxLogsInResponse
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
 	defer cancel()
 
-	logs, err := h.store.GetRecentFlowLogs(ctx, startTime)
+	logs, err := h.store.GetFlowLogsInRange(ctx, startTime, endTime, limit)
 	if err != nil {
 		log.Printf("ERROR GetStoredFlowLogs: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -265,7 +292,9 @@ func (h *Handlers) GetStoredFlowLogs(c *gin.Context) {
 		"logs": logs,
 		"metadata": gin.H{
 			"count":  len(logs),
-			"since":  startTime,
+			"start":  startTime,
+			"end":    endTime,
+			"limit":  limit,
 			"source": "database",
 		},
 	})
@@ -567,7 +596,8 @@ func (h *Handlers) GetBandwidthByIPs(c *gin.Context) {
 
 	// If no IPs provided, return total bandwidth
 	if ipsStr == "" {
-		c.Redirect(http.StatusTemporaryRedirect, "/api/bandwidth?start="+start+"&end="+end)
+		redirectURL := "/api/bandwidth?start=" + url.QueryEscape(startTime.Format(time.RFC3339)) + "&end=" + url.QueryEscape(endTime.Format(time.RFC3339))
+		c.Redirect(http.StatusTemporaryRedirect, redirectURL)
 		return
 	}
 
@@ -619,10 +649,13 @@ func (h *Handlers) GetBandwidthByIPs(c *gin.Context) {
 		}
 	}
 
-	// Convert map to slice
+	// Convert map to slice and sort by time
 	for _, b := range bucketMap {
 		allBuckets = append(allBuckets, *b)
 	}
+	sort.Slice(allBuckets, func(i, j int) bool {
+		return allBuckets[i].Time.Before(allBuckets[j].Time)
+	})
 
 	c.JSON(http.StatusOK, gin.H{
 		"buckets": allBuckets,

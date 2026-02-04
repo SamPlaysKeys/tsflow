@@ -52,6 +52,7 @@ type PollState struct {
 type DataRange struct {
 	Earliest time.Time `json:"earliest"`
 	Latest   time.Time `json:"latest"`
+	Count    int64     `json:"count"` // Total records in the range
 }
 
 // FlowLog represents a raw flow log entry (kept temporarily for current period)
@@ -79,6 +80,7 @@ type Store interface {
 	// Raw log operations (for current incomplete period only)
 	InsertFlowLogs(ctx context.Context, logs []FlowLog) (int, error)
 	GetRecentFlowLogs(ctx context.Context, since time.Time) ([]FlowLog, error)
+	GetFlowLogsInRange(ctx context.Context, start, end time.Time, limit int) ([]FlowLog, error)
 
 	// Pre-aggregated data operations
 	UpsertNodePairAggregates(ctx context.Context, aggregates []NodePairAggregate) error
@@ -97,7 +99,7 @@ type Store interface {
 
 	// Maintenance
 	Cleanup(ctx context.Context, retentionMinutely, retentionHourly, retentionDaily time.Duration) (int64, error)
-	GetStats(ctx context.Context) (map[string]interface{}, error)
+	GetStats(ctx context.Context) (map[string]any, error)
 }
 
 // SQLiteStore implements Store using SQLite
@@ -293,10 +295,11 @@ func (s *SQLiteStore) InsertFlowLogs(ctx context.Context, logs []FlowLog) (int, 
 	}
 	defer stmt.Close()
 
+	const sqliteFormat = "2006-01-02 15:04:05"
 	count := 0
 	for _, log := range logs {
 		_, err := stmt.ExecContext(ctx,
-			log.LoggedAt, log.NodeID, log.TrafficType, log.Protocol,
+			log.LoggedAt.UTC().Format(sqliteFormat), log.NodeID, log.TrafficType, log.Protocol,
 			log.SrcIP, log.SrcPort, log.DstIP, log.DstPort,
 			log.TxBytes, log.RxBytes, log.TxPkts, log.RxPkts,
 		)
@@ -327,6 +330,49 @@ func (s *SQLiteStore) GetRecentFlowLogs(ctx context.Context, since time.Time) ([
 		WHERE logged_at >= ?
 		ORDER BY logged_at ASC
 	`, since.UTC().Format(sqliteFormat))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query logs: %w", err)
+	}
+	defer rows.Close()
+
+	var logs []FlowLog
+	for rows.Next() {
+		var log FlowLog
+		var loggedAt string
+		err := rows.Scan(
+			&log.ID, &loggedAt, &log.NodeID, &log.TrafficType, &log.Protocol,
+			&log.SrcIP, &log.SrcPort, &log.DstIP, &log.DstPort,
+			&log.TxBytes, &log.RxBytes, &log.TxPkts, &log.RxPkts,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan log: %w", err)
+		}
+		log.LoggedAt = parseTime(loggedAt)
+		logs = append(logs, log)
+	}
+
+	return logs, rows.Err()
+}
+
+// GetFlowLogsInRange retrieves raw flow logs within a time range with optional limit
+func (s *SQLiteStore) GetFlowLogsInRange(ctx context.Context, start, end time.Time, limit int) ([]FlowLog, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	const sqliteFormat = "2006-01-02 15:04:05"
+	query := `
+		SELECT id, logged_at, node_id, traffic_type, protocol,
+			   src_ip, src_port, dst_ip, dst_port,
+			   tx_bytes, rx_bytes, tx_pkts, rx_pkts
+		FROM flow_logs_current
+		WHERE logged_at >= ? AND logged_at <= ?
+		ORDER BY logged_at ASC
+	`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, start.UTC().Format(sqliteFormat), end.UTC().Format(sqliteFormat))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query logs: %w", err)
 	}
@@ -385,7 +431,6 @@ func (s *SQLiteStore) UpsertNodePairAggregates(ctx context.Context, aggregates [
 		if err != nil {
 			return fmt.Errorf("failed to prepare statement for %s: %w", table, err)
 		}
-		defer stmt.Close()
 
 		for _, agg := range aggregates {
 			bucket := (agg.Bucket / bucketSize) * bucketSize
@@ -395,9 +440,11 @@ func (s *SQLiteStore) UpsertNodePairAggregates(ctx context.Context, aggregates [
 				agg.FlowCount, agg.Protocols, agg.Ports,
 			)
 			if err != nil {
+				stmt.Close()
 				return fmt.Errorf("failed to upsert aggregate: %w", err)
 			}
 		}
+		stmt.Close()
 	}
 
 	return tx.Commit()
@@ -424,16 +471,28 @@ func (s *SQLiteStore) GetNodePairAggregates(ctx context.Context, start, end time
 	}
 
 	query := fmt.Sprintf(`
-		SELECT bucket, src_node_id, dst_node_id, traffic_type,
+		SELECT MIN(bucket), src_node_id, dst_node_id, traffic_type,
 			   SUM(tx_bytes), SUM(rx_bytes), SUM(tx_pkts), SUM(rx_pkts),
-			   SUM(flow_count), protocols, ports
-		FROM %s
+			   SUM(flow_count),
+			   COALESCE((SELECT protocols FROM %s sub
+			    WHERE sub.src_node_id = main.src_node_id
+			      AND sub.dst_node_id = main.dst_node_id
+			      AND sub.traffic_type = main.traffic_type
+			      AND sub.bucket >= ? AND sub.bucket <= ?
+			    ORDER BY sub.bucket DESC LIMIT 1), '[]') as protocols,
+			   COALESCE((SELECT ports FROM %s sub
+			    WHERE sub.src_node_id = main.src_node_id
+			      AND sub.dst_node_id = main.dst_node_id
+			      AND sub.traffic_type = main.traffic_type
+			      AND sub.bucket >= ? AND sub.bucket <= ?
+			    ORDER BY sub.bucket DESC LIMIT 1), '[]') as ports
+		FROM %s main
 		WHERE bucket >= ? AND bucket <= ?
 		GROUP BY src_node_id, dst_node_id, traffic_type
 		ORDER BY SUM(tx_bytes) + SUM(rx_bytes) DESC
-	`, table)
+	`, table, table, table)
 
-	rows, err := s.db.QueryContext(ctx, query, startUnix, endUnix)
+	rows, err := s.db.QueryContext(ctx, query, startUnix, endUnix, startUnix, endUnix, startUnix, endUnix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query aggregates: %w", err)
 	}
@@ -485,15 +544,16 @@ func (s *SQLiteStore) UpsertBandwidth(ctx context.Context, buckets []BandwidthBu
 		if err != nil {
 			return fmt.Errorf("failed to prepare statement for %s: %w", table, err)
 		}
-		defer stmt.Close()
 
 		for _, b := range buckets {
 			bucket := (b.Time.UTC().Unix() / bs) * bs
 			_, err := stmt.ExecContext(ctx, bucket, b.TxBytes, b.RxBytes)
 			if err != nil {
+				stmt.Close()
 				return fmt.Errorf("failed to upsert bandwidth: %w", err)
 			}
 		}
+		stmt.Close()
 	}
 
 	return tx.Commit()
@@ -528,15 +588,16 @@ func (s *SQLiteStore) UpsertNodeBandwidth(ctx context.Context, buckets []NodeBan
 		if err != nil {
 			return fmt.Errorf("failed to prepare statement for %s: %w", table, err)
 		}
-		defer stmt.Close()
 
 		for _, b := range buckets {
 			bucket := (b.Bucket / bs) * bs
 			_, err := stmt.ExecContext(ctx, bucket, b.NodeID, b.TxBytes, b.RxBytes)
 			if err != nil {
+				stmt.Close()
 				return fmt.Errorf("failed to upsert node bandwidth: %w", err)
 			}
 		}
+		stmt.Close()
 	}
 
 	return tx.Commit()
@@ -666,9 +727,10 @@ func (s *SQLiteStore) UpdatePollState(ctx context.Context, lastPollEnd time.Time
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	const sqliteFormat = "2006-01-02 15:04:05"
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE poll_state SET last_poll_end = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1
-	`, lastPollEnd)
+	`, lastPollEnd.UTC().Format(sqliteFormat))
 	if err != nil {
 		return fmt.Errorf("failed to update poll state: %w", err)
 	}
@@ -683,11 +745,12 @@ func (s *SQLiteStore) GetDataRange(ctx context.Context) (*DataRange, error) {
 
 	var dataRange DataRange
 
-	// Get range from node_pairs_minutely (most granular pre-aggregated data)
+	// Get range and count from node_pairs_minutely (most granular pre-aggregated data)
 	var minBucket, maxBucket sql.NullInt64
+	var count int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT MIN(bucket), MAX(bucket) FROM node_pairs_minutely
-	`).Scan(&minBucket, &maxBucket)
+		SELECT MIN(bucket), MAX(bucket), COUNT(*) FROM node_pairs_minutely
+	`).Scan(&minBucket, &maxBucket, &count)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get data range: %w", err)
 	}
@@ -698,6 +761,7 @@ func (s *SQLiteStore) GetDataRange(ctx context.Context) (*DataRange, error) {
 	if maxBucket.Valid {
 		dataRange.Latest = time.Unix(maxBucket.Int64, 0).UTC()
 	}
+	dataRange.Count = count
 
 	return &dataRange, nil
 }
@@ -752,7 +816,8 @@ func (s *SQLiteStore) Cleanup(ctx context.Context, retentionMinutely, retentionH
 	}
 
 	// Clean up raw flow logs (keep only last 10 minutes)
-	flowLogCutoff := time.Now().Add(-10 * time.Minute)
+	const sqliteFormat = "2006-01-02 15:04:05"
+	flowLogCutoff := time.Now().Add(-10 * time.Minute).UTC().Format(sqliteFormat)
 	result, err := s.db.ExecContext(ctx, "DELETE FROM flow_logs_current WHERE logged_at < ?", flowLogCutoff)
 	if err != nil {
 		log.Printf("Warning: failed to cleanup flow_logs_current: %v", err)
@@ -764,11 +829,11 @@ func (s *SQLiteStore) Cleanup(ctx context.Context, retentionMinutely, retentionH
 }
 
 // GetStats returns database statistics
-func (s *SQLiteStore) GetStats(ctx context.Context) (map[string]interface{}, error) {
+func (s *SQLiteStore) GetStats(ctx context.Context) (map[string]any, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	stats := make(map[string]interface{})
+	stats := make(map[string]any)
 
 	// Count records in each table
 	tables := []string{
@@ -781,19 +846,35 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (map[string]interface{}, err
 	tableCounts := make(map[string]int64)
 	for _, table := range tables {
 		var count int64
-		s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count)
+		// Table names are hardcoded constants, safe to use fmt.Sprintf
+		if err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", table)).Scan(&count); err != nil {
+			// Log but don't fail - stats are best-effort
+			count = 0
+		}
 		tableCounts[table] = count
 	}
 	stats["tableCounts"] = tableCounts
 
 	// Database size
 	var pageCount, pageSize int64
-	s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount)
-	s.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize)
+	if err := s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount); err != nil {
+		pageCount = 0
+	}
+	if err := s.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize); err != nil {
+		pageSize = 0
+	}
 	stats["dbSizeBytes"] = pageCount * pageSize
 
-	// Data range
-	dataRange, _ := s.GetDataRange(ctx)
+	// Data range (inline to avoid nested lock acquisition)
+	var minBucket, maxBucket sql.NullInt64
+	_ = s.db.QueryRowContext(ctx, `SELECT MIN(bucket), MAX(bucket) FROM node_pairs_minutely`).Scan(&minBucket, &maxBucket)
+	dataRange := &DataRange{}
+	if minBucket.Valid {
+		dataRange.Earliest = time.Unix(minBucket.Int64, 0).UTC()
+	}
+	if maxBucket.Valid {
+		dataRange.Latest = time.Unix(maxBucket.Int64, 0).UTC()
+	}
 	stats["dataRange"] = dataRange
 
 	return stats, nil

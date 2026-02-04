@@ -94,25 +94,30 @@ func setCacheHeaders(c *gin.Context, config CacheConfig) {
 // ETagMiddleware generates and validates ETags for responses
 func ETagMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Next()
-
-		// Only for successful GET requests
-		if c.Request.Method != "GET" || c.Writer.Status() >= 400 {
+		// Only for GET requests
+		if c.Request.Method != "GET" {
+			c.Next()
 			return
 		}
 
-		// Generate ETag from response size and current time bucket (5 second resolution)
+		// Generate ETag from time bucket (5 second resolution) and URL
 		// This ensures cache invalidation every 5 seconds for live data
 		timeBucket := time.Now().Unix() / 5
 		hash := md5.Sum([]byte(strconv.FormatInt(timeBucket, 10) + c.Request.URL.String()))
 		etag := `"` + hex.EncodeToString(hash[:8]) + `"`
 
-		c.Header("ETag", etag)
-
-		// Check If-None-Match
+		// Check If-None-Match BEFORE processing request
 		if c.GetHeader("If-None-Match") == etag {
-			c.Status(304)
+			c.Header("ETag", etag)
+			c.AbortWithStatus(304)
 			return
+		}
+
+		c.Next()
+
+		// Only set ETag for successful responses
+		if c.Writer.Status() < 400 {
+			c.Header("ETag", etag)
 		}
 	}
 }

@@ -217,8 +217,8 @@
 		}
 	}
 
-	function handleNodeClick(event: CustomEvent) {
-		const nodeId = event.detail.node?.id;
+	function handleNodeClick({ node }: { node: Node; event: MouseEvent | TouchEvent }) {
+		const nodeId = node?.id;
 		if (nodeId) {
 			uiStore.selectNode(nodeId);
 
@@ -238,8 +238,7 @@
 		}
 	}
 
-	function handleEdgeClick(event: CustomEvent) {
-		const edge = event.detail.edge;
+	function handleEdgeClick({ edge }: { edge: Edge; event: MouseEvent }) {
 		if (edge) {
 			uiStore.selectEdge(edge.id);
 
@@ -270,17 +269,17 @@
 	{:else}
 		<SvelteFlowProvider>
 			<SvelteFlow
-				nodes={flowNodesStore}
-				edges={flowEdgesStore}
+				nodes={$flowNodesStore}
+				edges={$flowEdgesStore}
 				{nodeTypes}
 				{colorMode}
 				fitView
 				minZoom={0.01}
 				maxZoom={10}
 				proOptions={{ hideAttribution: true }}
-				on:nodeclick={handleNodeClick}
-				on:edgeclick={handleEdgeClick}
-				on:paneclick={handlePaneClick}
+				onnodeclick={handleNodeClick}
+				onedgeclick={handleEdgeClick}
+				onpaneclick={handlePaneClick}
 				oninit={captureFlowInstance}
 			>
 				<Background />
