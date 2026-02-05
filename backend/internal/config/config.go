@@ -17,6 +17,7 @@ type Config struct {
 	TailscaleOAuthScopes       []string
 	Port                       string
 	Environment                string
+	AllowedCORSOrigins         []string
 }
 
 // Load loads configuration from environment variables
@@ -31,6 +32,7 @@ func Load() *Config {
 		TailscaleOAuthScopes:       parseScopes(getEnvWithFallback("TAILSCALE_OAUTH_SCOPES")),
 		Port:                       getEnvWithDefault("PORT", "8080"),
 		Environment:                getEnvWithDefault("ENVIRONMENT", "development"),
+		AllowedCORSOrigins:         parseCORSOrigins(getEnvWithFallback("ALLOWED_CORS_ORIGINS")),
 	}
 }
 
@@ -81,4 +83,17 @@ func parseScopes(scopesStr string) []string {
 		scopes[i] = strings.TrimSpace(scope)
 	}
 	return scopes
+}
+
+// parseCORSOrigins parses a comma-separated string of allowed CORS origins
+// Returns nil to indicate all origins allowed (for development)
+func parseCORSOrigins(originsStr string) []string {
+	if originsStr == "" {
+		return nil // Allow all origins when not specified
+	}
+	origins := strings.Split(originsStr, ",")
+	for i, origin := range origins {
+		origins[i] = strings.TrimSpace(origin)
+	}
+	return origins
 }

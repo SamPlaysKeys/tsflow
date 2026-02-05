@@ -26,10 +26,18 @@ export function extractPort(address: string): number | null {
 		return portStr ? parseInt(portStr, 10) : null;
 	}
 
+	// IPv6 addresses without brackets have no port (port requires bracket notation)
+	// Check for IPv6 by looking for multiple colons or :: compression
+	if (address.includes('::') || (address.match(/:/g) || []).length > 1) {
+		return null;
+	}
+
 	// Handle IPv4 addresses like 100.72.184.20:53221
 	if (address.includes(':')) {
 		const portStr = address.split(':').pop();
-		return portStr ? parseInt(portStr, 10) : null;
+		const port = portStr ? parseInt(portStr, 10) : null;
+		// Ensure we got a valid port number
+		return port !== null && !isNaN(port) ? port : null;
 	}
 
 	return null;

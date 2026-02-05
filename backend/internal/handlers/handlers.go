@@ -199,7 +199,7 @@ func (h *Handlers) GetNetworkLogs(c *gin.Context) {
 		}
 
 		sampleRate := 1
-		if len(finalLogs) > 0 {
+		if len(finalLogs) > 0 && len(allLogs) >= len(finalLogs) {
 			sampleRate = len(allLogs) / len(finalLogs)
 		}
 		c.JSON(http.StatusOK, gin.H{

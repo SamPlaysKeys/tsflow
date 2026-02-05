@@ -431,20 +431,25 @@ func (s *SQLiteStore) UpsertNodePairAggregates(ctx context.Context, aggregates [
 		if err != nil {
 			return fmt.Errorf("failed to prepare statement for %s: %w", table, err)
 		}
-
-		for _, agg := range aggregates {
-			bucket := (agg.Bucket / bucketSize) * bucketSize
-			_, err := stmt.ExecContext(ctx,
-				bucket, agg.SrcNodeID, agg.DstNodeID, agg.TrafficType,
-				agg.TxBytes, agg.RxBytes, agg.TxPkts, agg.RxPkts,
-				agg.FlowCount, agg.Protocols, agg.Ports,
-			)
-			if err != nil {
-				stmt.Close()
-				return fmt.Errorf("failed to upsert aggregate: %w", err)
+		// Use closure to ensure stmt is closed even on error
+		err = func() error {
+			defer stmt.Close()
+			for _, agg := range aggregates {
+				bucket := (agg.Bucket / bucketSize) * bucketSize
+				_, err := stmt.ExecContext(ctx,
+					bucket, agg.SrcNodeID, agg.DstNodeID, agg.TrafficType,
+					agg.TxBytes, agg.RxBytes, agg.TxPkts, agg.RxPkts,
+					agg.FlowCount, agg.Protocols, agg.Ports,
+				)
+				if err != nil {
+					return fmt.Errorf("failed to upsert aggregate: %w", err)
+				}
 			}
+			return nil
+		}()
+		if err != nil {
+			return err
 		}
-		stmt.Close()
 	}
 
 	return tx.Commit()
@@ -549,16 +554,21 @@ func (s *SQLiteStore) UpsertBandwidth(ctx context.Context, buckets []BandwidthBu
 		if err != nil {
 			return fmt.Errorf("failed to prepare statement for %s: %w", table, err)
 		}
-
-		for _, b := range buckets {
-			bucket := (b.Time.UTC().Unix() / bs) * bs
-			_, err := stmt.ExecContext(ctx, bucket, b.TxBytes, b.RxBytes)
-			if err != nil {
-				stmt.Close()
-				return fmt.Errorf("failed to upsert bandwidth: %w", err)
+		// Use closure to ensure stmt is closed even on error
+		err = func() error {
+			defer stmt.Close()
+			for _, b := range buckets {
+				bucket := (b.Time.UTC().Unix() / bs) * bs
+				_, err := stmt.ExecContext(ctx, bucket, b.TxBytes, b.RxBytes)
+				if err != nil {
+					return fmt.Errorf("failed to upsert bandwidth: %w", err)
+				}
 			}
+			return nil
+		}()
+		if err != nil {
+			return err
 		}
-		stmt.Close()
 	}
 
 	return tx.Commit()
@@ -593,16 +603,21 @@ func (s *SQLiteStore) UpsertNodeBandwidth(ctx context.Context, buckets []NodeBan
 		if err != nil {
 			return fmt.Errorf("failed to prepare statement for %s: %w", table, err)
 		}
-
-		for _, b := range buckets {
-			bucket := (b.Bucket / bs) * bs
-			_, err := stmt.ExecContext(ctx, bucket, b.NodeID, b.TxBytes, b.RxBytes)
-			if err != nil {
-				stmt.Close()
-				return fmt.Errorf("failed to upsert node bandwidth: %w", err)
+		// Use closure to ensure stmt is closed even on error
+		err = func() error {
+			defer stmt.Close()
+			for _, b := range buckets {
+				bucket := (b.Bucket / bs) * bs
+				_, err := stmt.ExecContext(ctx, bucket, b.NodeID, b.TxBytes, b.RxBytes)
+				if err != nil {
+					return fmt.Errorf("failed to upsert node bandwidth: %w", err)
+				}
 			}
+			return nil
+		}()
+		if err != nil {
+			return err
 		}
-		stmt.Close()
 	}
 
 	return tx.Commit()

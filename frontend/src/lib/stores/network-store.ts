@@ -250,7 +250,10 @@ function convertStoredLogsToNetworkLogs(storedLogs: any[]): NetworkLog[] {
 		if (!grouped.has(key)) {
 			grouped.set(key, []);
 		}
-		grouped.get(key)!.push(log);
+		const group = grouped.get(key);
+		if (group) {
+			group.push(log);
+		}
 	}
 
 	// Convert to NetworkLog format
@@ -327,7 +330,10 @@ function convertAggregatedFlowsToNetworkLogs(flows: AggregatedFlow[], rangeStart
 		if (!grouped.has(key)) {
 			grouped.set(key, []);
 		}
-		grouped.get(key)!.push(flow);
+		const group = grouped.get(key);
+		if (group) {
+			group.push(flow);
+		}
 	}
 
 	const networkLogs: NetworkLog[] = [];
