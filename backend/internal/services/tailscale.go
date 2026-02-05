@@ -494,14 +494,22 @@ func (ts *TailscaleService) GetNetworkLogsChunkedParallelWithContext(ctx context
 
 	// Filter out nil results and maintain order
 	var allLogs []any
+	failedChunks := 0
 	for _, logs := range results {
 		if logs != nil {
 			allLogs = append(allLogs, logs)
+		} else {
+			failedChunks++
 		}
 	}
 
 	if hasError && len(allLogs) == 0 {
 		return nil, fmt.Errorf("failed to fetch any logs from parallel requests")
+	}
+
+	// Warn about partial failures - data may be incomplete
+	if failedChunks > 0 {
+		log.Printf("Warning: %d/%d chunks failed during parallel fetch - results may be incomplete", failedChunks, len(chunks))
 	}
 
 	return allLogs, nil

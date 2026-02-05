@@ -28,7 +28,14 @@ const defaultFilterState: FilterState = {
 	selectedTags: []
 };
 
-// Create filter store
+// Debounce delay for search filtering (ms)
+const SEARCH_DEBOUNCE_MS = 300;
+
+// Debounced search value - used by derived stores for filtering
+const debouncedSearchStore = writable('');
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Create filter store with debounced search
 function createFilterStore() {
 	const { subscribe, set, update } = writable<FilterState>(defaultFilterState);
 
@@ -36,7 +43,17 @@ function createFilterStore() {
 		subscribe,
 		set,
 		update,
-		setSearch: (search: string) => update((s) => ({ ...s, search })),
+		setSearch: (search: string) => {
+			// Update immediate value for UI responsiveness
+			update((s) => ({ ...s, search }));
+
+			// Debounce the value used for expensive filtering operations
+			if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+			searchDebounceTimer = setTimeout(() => {
+				debouncedSearchStore.set(search);
+				searchDebounceTimer = null;
+			}, SEARCH_DEBOUNCE_MS);
+		},
 		setProtocols: (protocols: Protocol[]) => update((s) => ({ ...s, protocols })),
 		toggleProtocol: (protocol: Protocol) =>
 			update((s) => ({
@@ -59,11 +76,36 @@ function createFilterStore() {
 		toggleIpv4: () => update((s) => ({ ...s, showIpv4: !s.showIpv4 })),
 		toggleIpv6: () => update((s) => ({ ...s, showIpv6: !s.showIpv6 })),
 		setSelectedTags: (tags: string[]) => update((s) => ({ ...s, selectedTags: tags })),
-		reset: () => set(defaultFilterState)
+		reset: () => {
+			set(defaultFilterState);
+			// Also reset debounced search immediately
+			if (searchDebounceTimer) {
+				clearTimeout(searchDebounceTimer);
+				searchDebounceTimer = null;
+			}
+			debouncedSearchStore.set('');
+		},
+		// Cleanup function to clear any pending timers (call on unmount)
+		cleanup: () => {
+			if (searchDebounceTimer) {
+				clearTimeout(searchDebounceTimer);
+				searchDebounceTimer = null;
+			}
+		}
 	};
 }
 
 export const filterStore = createFilterStore();
+
+// Derived store that combines filter state with debounced search
+// Use this for expensive filtering operations (network-store, LogViewer)
+export const debouncedFilterStore = derived(
+	[filterStore, debouncedSearchStore],
+	([$filters, $debouncedSearch]) => ({
+		...$filters,
+		search: $debouncedSearch
+	})
+);
 
 // Time range store
 function createTimeRangeStore() {
@@ -101,7 +143,10 @@ function createTimeRangeStore() {
 				return { start, end };
 			}
 
-			// Fallback to 5 minutes
+			// Fallback to 5 minutes - log warning for debugging
+			if ($store.selected !== 'custom') {
+				console.warn(`Unknown time range preset: "${$store.selected}", falling back to 5 minutes`);
+			}
 			const end = new Date();
 			const start = new Date(end.getTime() - 5 * 60 * 1000);
 			return { start, end };

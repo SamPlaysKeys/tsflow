@@ -84,7 +84,8 @@
 				type="text"
 				placeholder="Search devices, tag:k8s, ip:100..."
 				class="w-full rounded-md border border-input bg-background py-2 pl-3 pr-8 text-sm"
-				bind:value={$filterStore.search}
+				value={$filterStore.search}
+				oninput={(e) => filterStore.setSearch(e.currentTarget.value)}
 			/>
 			{#if $filterStore.search}
 				<button

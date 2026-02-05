@@ -301,6 +301,11 @@ function convertStoredLogsToNetworkLogs(storedLogs: any[]): NetworkLog[] {
 				case 'physical':
 					networkLog.physicalTraffic.push(traffic);
 					break;
+				default:
+					// Unknown traffic type - default to virtual to avoid data loss
+					console.warn(`Unknown traffic type "${log.trafficType}" in stored log, treating as virtual`);
+					networkLog.virtualTraffic.push(traffic);
+					break;
 			}
 		}
 
@@ -365,6 +370,11 @@ function convertAggregatedFlowsToNetworkLogs(flows: AggregatedFlow[], rangeStart
 				case 'physical':
 					networkLog.physicalTraffic.push(traffic);
 					break;
+				default:
+					// Unknown traffic type - default to virtual to avoid data loss
+					console.warn(`Unknown traffic type "${flow.trafficType}" for flow ${flow.srcNodeId} -> ${flow.dstNodeId}, treating as virtual`);
+					networkLog.virtualTraffic.push(traffic);
+					break;
 			}
 		}
 
@@ -376,6 +386,13 @@ function convertAggregatedFlowsToNetworkLogs(flows: AggregatedFlow[], rangeStart
 
 // Refresh data periodically
 let refreshInterval: ReturnType<typeof setInterval> | null = null;
+
+// Clean up on page unload to prevent memory leaks
+if (typeof window !== 'undefined') {
+	window.addEventListener('beforeunload', () => {
+		stopAutoRefresh();
+	});
+}
 
 export function startAutoRefresh(intervalMs = 300000) {
 	stopAutoRefresh();

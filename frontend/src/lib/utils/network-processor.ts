@@ -265,15 +265,17 @@ export function processNetworkLogs(
 
 			// Only track ports for virtual and subnet traffic (not physical)
 			// Physical traffic represents underlying transport (DERP, direct) with different port semantics
-			// This matches Port Usage panel which only analyzes virtual/subnet traffic
 			if (traffic.type !== 'physical' && (traffic.proto === 6 || traffic.proto === 17)) {
+				const srcPort = extractPort(traffic.src);
 				const dstPort = extractPort(traffic.dst);
 
-				// Add destination port to BOTH nodes - both are "involved" in this flow
-				// This matches Port Usage panel which counts destination ports for all traffic
-				// involving a node (whether as source or destination)
+				// Track ports with correct direction semantics:
+				// - Source node: outgoing port (ephemeral, less meaningful)
+				// - Destination node: incoming port (service port, meaningful for analysis)
+				if (srcPort !== null) {
+					srcNode.outgoingPorts.add(srcPort);
+				}
 				if (dstPort !== null) {
-					srcNode.incomingPorts.add(dstPort);
 					dstNode.incomingPorts.add(dstPort);
 				}
 			}

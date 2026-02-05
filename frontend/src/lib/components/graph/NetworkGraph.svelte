@@ -56,8 +56,8 @@
 		return `stroke: ${strokeColor}; stroke-width: ${strokeWidth}px; opacity: ${opacity};`;
 	}
 
-	// Keep track of original edges for style updates
-	let originalEdges: NetworkLink[] = [];
+	// Keep track of original edges for style updates (use $state.raw for reference tracking)
+	let originalEdges = $state.raw<NetworkLink[]>([]);
 
 	// Map our theme to xyflow colorMode
 	const colorMode = $derived.by((): ColorMode => {
@@ -66,6 +66,35 @@
 		if (mode === 'light') return 'light';
 		return 'dark';
 	});
+
+	// Cache CSS variable values for MiniMap to avoid expensive getComputedStyle calls
+	// Uses a simple memoization pattern outside of Svelte's reactive system
+	let colorCacheTheme: string | null = null;
+	let colorCacheValues: Record<string, string> | null = null;
+
+	function getNodeColors(): Record<string, string> {
+		const currentTheme = $themeStore;
+		// Return cached if theme hasn't changed
+		if (colorCacheValues && colorCacheTheme === currentTheme) {
+			return colorCacheValues;
+		}
+		// Compute and cache
+		const defaults = { derp: '#8b5cf6', tailscale: '#3b82f6', private: '#10b981', public: '#f59e0b' };
+		if (typeof document === 'undefined') {
+			colorCacheValues = defaults;
+			colorCacheTheme = currentTheme;
+			return defaults;
+		}
+		const style = getComputedStyle(document.documentElement);
+		colorCacheValues = {
+			derp: style.getPropertyValue('--color-node-derp').trim() || '#8b5cf6',
+			tailscale: style.getPropertyValue('--color-node-tailscale').trim() || '#3b82f6',
+			private: style.getPropertyValue('--color-node-private').trim() || '#10b981',
+			public: style.getPropertyValue('--color-node-public').trim() || '#f59e0b'
+		};
+		colorCacheTheme = currentTheme;
+		return colorCacheValues;
+	}
 
 	// Create writable stores for SvelteFlow
 	const flowNodesStore = writable<Node[]>([]);
@@ -118,25 +147,65 @@
 		);
 	}
 
+	// Track edge IDs and total bytes for change detection
+	let lastEdgeKey = '';
+
 	// Update stores and apply layout when props change
 	$effect(() => {
 		const currentNodeIds = nodes.map((n) => n.id).sort().join(',');
+		// Create a key that captures edge identity AND traffic data
+		const currentEdgeKey = edges.map((e) => `${e.id}:${e.totalBytes}`).sort().join(',');
 
 		// Only re-layout if nodes changed
 		if (currentNodeIds !== lastNodeIds && nodes.length > 0) {
 			lastNodeIds = currentNodeIds;
-			originalEdges = edges; // Store for style updates
+			lastEdgeKey = currentEdgeKey;
+			// Call layoutNodes first - it sets isLayouting = true synchronously
+			// This ensures Effect 2 knows we're layouting when it sees originalEdges change
 			layoutNodes();
+			// Update originalEdges AFTER layoutNodes starts (so isLayouting is true)
+			originalEdges = edges;
+		} else if (currentEdgeKey !== lastEdgeKey && !isLayouting) {
+			// Edge data changed but nodes didn't - update edge styles without re-layout
+			lastEdgeKey = currentEdgeKey;
+			originalEdges = edges;
+			const highlighted = $highlightedEdgeIds;
+			const isSelectionActive = $hasSelection;
+
+			flowEdgesStore.update((currentEdges) => {
+				return currentEdges.map((flowEdge) => {
+					const originalEdge = edges.find((e) => e.id === flowEdge.id);
+					if (!originalEdge) return flowEdge;
+
+					const dimmed = isSelectionActive && !highlighted.has(flowEdge.id);
+					return {
+						...flowEdge,
+						style: getEdgeStyle(originalEdge, dimmed)
+					};
+				});
+			});
+		} else {
+			// No layout or edge key change, but still keep originalEdges in sync
+			originalEdges = edges;
 		}
 	});
+
+	// Track pending style update during layout
+	let pendingStyleUpdate = $state(false);
 
 	// Update edge styles when selection changes
 	$effect(() => {
 		const highlighted = $highlightedEdgeIds;
 		const isSelectionActive = $hasSelection;
 
-		// Only update if we have edges and not currently layouting
-		if (originalEdges.length === 0 || isLayouting) return;
+		// Only update if we have edges
+		if (originalEdges.length === 0) return;
+
+		// If currently layouting, mark that we need to update styles after
+		if (isLayouting) {
+			pendingStyleUpdate = true;
+			return;
+		}
 
 		flowEdgesStore.update((currentEdges) => {
 			return currentEdges.map((flowEdge) => {
@@ -150,6 +219,28 @@
 				};
 			});
 		});
+	});
+
+	// Apply pending style updates after layout completes
+	$effect(() => {
+		if (!isLayouting && pendingStyleUpdate && originalEdges.length > 0) {
+			pendingStyleUpdate = false;
+			const highlighted = $highlightedEdgeIds;
+			const isSelectionActive = $hasSelection;
+
+			flowEdgesStore.update((currentEdges) => {
+				return currentEdges.map((flowEdge) => {
+					const originalEdge = originalEdges.find((e) => e.id === flowEdge.id);
+					if (!originalEdge) return flowEdge;
+
+					const dimmed = isSelectionActive && !highlighted.has(flowEdge.id);
+					return {
+						...flowEdge,
+						style: getEdgeStyle(originalEdge, dimmed)
+					};
+				});
+			});
+		}
 	});
 
 	async function layoutNodes() {
@@ -287,11 +378,11 @@
 				<MiniMap
 					nodeColor={(node) => {
 						const data = node.data as any;
-						const style = getComputedStyle(document.documentElement);
-						if (data?.tags?.includes('derp')) return style.getPropertyValue('--color-node-derp').trim() || '#8b5cf6';
-						if (data?.isTailscale) return style.getPropertyValue('--color-node-tailscale').trim() || '#3b82f6';
-						if (data?.tags?.includes('private')) return style.getPropertyValue('--color-node-private').trim() || '#10b981';
-						return style.getPropertyValue('--color-node-public').trim() || '#f59e0b';
+						const colors = getNodeColors();
+						if (data?.tags?.includes('derp')) return colors.derp;
+						if (data?.isTailscale) return colors.tailscale;
+						if (data?.tags?.includes('private')) return colors.private;
+						return colors.public;
 					}}
 				/>
 			</SvelteFlow>

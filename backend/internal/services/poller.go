@@ -315,10 +315,11 @@ type Poller struct {
 	doneChan chan struct{}
 
 	// Stats
-	lastPollTime  time.Time
-	lastPollCount int
-	totalPolled   int64
-	pollErrors    int64
+	lastPollTime       time.Time
+	lastPollCount      int
+	totalPolled        int64
+	pollErrors         int64
+	cacheRefreshErrors int64
 }
 
 // NewPoller creates a new background poller
@@ -439,6 +440,9 @@ func (p *Poller) run(ctx context.Context) {
 			if p.deviceCache.NeedsRefresh(p.config.DeviceCacheRefresh) {
 				if err := p.refreshDeviceCache(ctx); err != nil {
 					log.Printf("Warning: device cache refresh failed: %v", err)
+					p.mu.Lock()
+					p.cacheRefreshErrors++
+					p.mu.Unlock()
 				}
 			}
 
@@ -481,8 +485,10 @@ func (p *Poller) poll(ctx context.Context) error {
 		start = end.Add(-p.config.InitialBackfill)
 		log.Printf("First poll, backfilling from %v", start)
 	} else {
-		// Continue from where we left off (with small overlap)
-		start = pollState.LastPollEnd.Add(-30 * time.Second)
+		// Continue from exactly where we left off - no overlap
+		// The additive upsert logic in the database causes double-counting
+		// if we re-fetch any data, so we must start exactly at LastPollEnd
+		start = pollState.LastPollEnd
 	}
 
 	// Fetch logs from Tailscale API

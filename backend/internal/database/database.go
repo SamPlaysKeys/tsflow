@@ -457,6 +457,11 @@ func (s *SQLiteStore) GetNodePairAggregates(ctx context.Context, start, end time
 
 	startUnix := start.UTC().Unix()
 	endUnix := end.UTC().Unix()
+
+	if startUnix >= endUnix {
+		return nil, fmt.Errorf("invalid time range: start (%v) must be before end (%v)", start, end)
+	}
+
 	rangeSeconds := endUnix - startUnix
 
 	// Choose table based on range
@@ -610,6 +615,12 @@ func (s *SQLiteStore) GetBandwidth(ctx context.Context, start, end time.Time) ([
 
 	startUnix := start.UTC().Unix()
 	endUnix := end.UTC().Unix()
+
+	// Validate time range - start must be before end
+	if startUnix >= endUnix {
+		return nil, fmt.Errorf("invalid time range: start (%v) must be before end (%v)", start, end)
+	}
+
 	rangeSeconds := endUnix - startUnix
 
 	var table string
@@ -657,6 +668,11 @@ func (s *SQLiteStore) GetNodeBandwidth(ctx context.Context, start, end time.Time
 
 	startUnix := start.UTC().Unix()
 	endUnix := end.UTC().Unix()
+
+	if startUnix >= endUnix {
+		return nil, fmt.Errorf("invalid time range: start (%v) must be before end (%v)", start, end)
+	}
+
 	rangeSeconds := endUnix - startUnix
 
 	var table string

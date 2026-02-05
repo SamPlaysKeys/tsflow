@@ -1,7 +1,28 @@
 import ELK, { type ElkNode, type ElkExtendedEdge, type LayoutOptions } from 'elkjs/lib/elk.bundled.js';
 import type { Node, Edge } from '@xyflow/svelte';
 
-const elk = new ELK();
+// Track worker initialization status for debugging
+let workerInitFailed = false;
+
+// Use Web Worker for layout calculations to avoid blocking the main thread
+const elk = new ELK({
+	workerFactory: () => {
+		try {
+			const worker = new Worker(new URL('elkjs/lib/elk-worker.min.js', import.meta.url), {
+				type: 'module'
+			});
+			worker.onerror = (e) => {
+				console.error('ELK worker error:', e.message);
+				workerInitFailed = true;
+			};
+			return worker;
+		} catch (error) {
+			console.error('Failed to create ELK worker:', error);
+			workerInitFailed = true;
+			throw error;
+		}
+	}
+});
 
 const DEFAULT_NODE_WIDTH = 200;
 const DEFAULT_NODE_HEIGHT = 80;
@@ -122,7 +143,8 @@ export async function applyElkLayout(
 
 		return { nodes: layoutedNodes, edges };
 	} catch (error) {
-		console.error('ELK layout failed, using fallback:', error);
+		const errorContext = workerInitFailed ? ' (worker initialization failed)' : '';
+		console.error(`ELK layout failed${errorContext}, using fallback grid layout:`, error);
 		return applyFallbackLayout(nodes, edges, options.nodeSpacing || 150);
 	}
 }

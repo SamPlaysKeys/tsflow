@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { uiStore, filteredNodes, rawLogs } from '$lib/stores';
-	import { formatBytes, extractIP, getProtocolName } from '$lib/utils';
+	import { formatBytes, extractIP, extractPort, getProtocolName } from '$lib/utils';
 	import type { NetworkLog } from '$lib/types';
 
 	// Well-known port names
@@ -65,7 +65,7 @@
 			allTraffic.forEach((t) => {
 				const srcIP = extractIP(t.src);
 				const dstIP = extractIP(t.dst);
-				const dstPort = parseInt(t.dst.split(':')[1]) || 0;
+				const dstPort = extractPort(t.dst) || 0;
 				const proto = getProtocolName(t.proto || 0);
 
 				// Check if this node is involved
@@ -107,9 +107,32 @@
 	const portStats = $derived(portData.stats);
 	const totalPortCount = $derived(portData.totalCount);
 
+	// Calculate total traffic from all ports (not just displayed top 20)
 	const totalTraffic = $derived.by(() => {
-		const tx = portStats.reduce((sum, p) => sum + p.txBytes, 0);
-		const rx = portStats.reduce((sum, p) => sum + p.rxBytes, 0);
+		if (!selectedNode) return { tx: 0, rx: 0, total: 0 };
+
+		const nodeIPs = new Set(selectedNode.ips);
+		let tx = 0;
+		let rx = 0;
+
+		$rawLogs.forEach((log: NetworkLog) => {
+			const allTraffic = [
+				...(log.virtualTraffic || []),
+				...(log.subnetTraffic || [])
+			];
+
+			allTraffic.forEach((t) => {
+				const srcIP = extractIP(t.src);
+				const dstIP = extractIP(t.dst);
+
+				// Check if this node is involved
+				if (nodeIPs.has(srcIP) || nodeIPs.has(dstIP)) {
+					tx += t.txBytes || 0;
+					rx += t.rxBytes || 0;
+				}
+			});
+		});
+
 		return { tx, rx, total: tx + rx };
 	});
 </script>

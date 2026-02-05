@@ -57,6 +57,13 @@
 		return () => {
 			clearInterval(interval);
 			if (reloadTimeout) clearTimeout(reloadTimeout);
+			// Clean up any drag event listeners if component unmounts while dragging
+			if (dragging) {
+				window.removeEventListener('mousemove', handleMouseMove);
+				window.removeEventListener('mouseup', handleMouseUp);
+				window.removeEventListener('touchmove', handleMouseMove);
+				window.removeEventListener('touchend', handleMouseUp);
+			}
 		};
 	});
 
