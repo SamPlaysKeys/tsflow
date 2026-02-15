@@ -1,0 +1,42 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "platformAutomerge": false,
+  "packageRules": [
+    {
+      "description": "Auto merge all non-major updates",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "Auto merge major updates for dev dependencies",
+      "matchDepTypes": ["devDependencies"],
+      "automerge": true
+    },
+    {
+      "description": "Auto merge Go module updates",
+      "matchManagers": ["gomod"],
+      "automerge": true
+    },
+    {
+      "description": "Auto merge Docker tag updates",
+      "matchManagers": ["dockerfile", "docker-compose"],
+      "automerge": true
+    },
+    {
+      "description": "Auto merge GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "automerge": true
+    },
+    {
+      "description": "Auto merge Go toolchain updates",
+      "matchDepNames": ["go"],
+      "automerge": true
+    },
+    {
+      "description": "Auto merge npm updates",
+      "matchManagers": ["npm"],
+      "automerge": true
+    }
+  ]
+}
