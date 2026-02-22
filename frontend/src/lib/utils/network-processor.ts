@@ -173,7 +173,8 @@ export function processNetworkLogs(
 					incomingPorts: new Set<number>(),
 					outgoingPorts: new Set<number>(),
 					protocols: new Set<string>(),
-					device: deviceData || undefined
+					device: deviceData || undefined,
+					isVIPService: serviceData !== null
 				});
 			} else {
 				const existingNode = nodeMap.get(srcNodeId)!;
@@ -224,7 +225,8 @@ export function processNetworkLogs(
 					incomingPorts: new Set<number>(),
 					outgoingPorts: new Set<number>(),
 					protocols: new Set<string>(),
-					device: deviceData || undefined
+					device: deviceData || undefined,
+					isVIPService: serviceData !== null
 				});
 			} else {
 				const existingNode = nodeMap.get(dstNodeId)!;

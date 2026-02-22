@@ -60,6 +60,7 @@ export interface NetworkNode {
 	outgoingPorts: Set<number>;
 	protocols: Set<string>;
 	device?: Device;
+	isVIPService: boolean;
 }
 
 export interface NetworkLink {

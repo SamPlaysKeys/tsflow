@@ -12,12 +12,12 @@
 	const trafficTypes: { value: TrafficType; label: string; defaultOn: boolean }[] = [
 		{ value: 'virtual', label: 'Virtual', defaultOn: true },
 		{ value: 'exit', label: 'Exit Node', defaultOn: false },
-		{ value: 'subnet', label: 'Subnet', defaultOn: false },
+		{ value: 'subnet', label: 'Subnet', defaultOn: true },
 		{ value: 'physical', label: 'Physical', defaultOn: false }
 	];
 
-	// Initialize with defaults (virtual ON, others OFF)
-	let selectedTrafficTypes = $state<Set<string>>(new Set(['virtual']));
+	// Initialize with defaults (virtual and subnet ON, others OFF)
+	let selectedTrafficTypes = $state<Set<string>>(new Set(['virtual', 'subnet']));
 
 	// Initialize filter store with defaults once on mount
 	onMount(() => {

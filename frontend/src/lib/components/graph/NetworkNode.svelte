@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { Handle, Position } from '@xyflow/svelte';
-	import { Server, Globe, Network, Radio } from 'lucide-svelte';
+	import { Server, Globe, Network, Radio, Cloud } from 'lucide-svelte';
 	import { formatBytes } from '$lib/utils';
 	import { highlightedNodeIds, hasSelection } from '$lib/stores/ui-store';
 	import type { NetworkNode } from '$lib/types';
@@ -30,6 +30,7 @@
 
 	// Determine node color based on type
 	const nodeColor = $derived.by(() => {
+		if (data.isVIPService) return 'var(--color-node-vip)';
 		if (data.tags?.includes('derp')) return 'var(--color-node-derp)';
 		if (data.isTailscale) return 'var(--color-node-tailscale)';
 		if (data.tags?.includes('private')) return 'var(--color-node-private)';
@@ -38,6 +39,7 @@
 
 	// Determine icon type
 	const iconType = $derived.by(() => {
+		if (data.isVIPService) return 'vip';
 		if (data.tags?.includes('derp')) return 'derp';
 		if (data.isTailscale) return 'tailscale';
 		if (data.tags?.includes('private')) return 'private';
@@ -90,7 +92,9 @@
 	<div class="rounded-t-md px-3 py-2" style="background: color-mix(in srgb, {nodeColor} 15%, transparent)">
 		<div class="flex items-start justify-between gap-3">
 			<div class="flex items-center gap-2 min-w-0">
-				{#if iconType === 'derp'}
+				{#if iconType === 'vip'}
+					<Cloud class="h-4 w-4 shrink-0" style="color: {nodeColor}" />
+				{:else if iconType === 'derp'}
 					<Radio class="h-4 w-4 shrink-0" style="color: {nodeColor}" />
 				{:else if iconType === 'tailscale'}
 					<Server class="h-4 w-4 shrink-0" style="color: {nodeColor}" />
@@ -106,6 +110,11 @@
 				>
 					{data.displayName}
 				</span>
+				{#if data.isVIPService}
+					<span class="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none text-white" style="background-color: {nodeColor}">
+						VIP
+					</span>
+				{/if}
 			</div>
 			<div class="shrink-0 text-right whitespace-nowrap">
 				<div class="text-xs font-bold text-node-private">{formatBytes(data.totalBytes)}</div>
@@ -182,7 +191,10 @@
 	<!-- Footer -->
 	<div class="flex items-center justify-between border-t border-border px-3 py-1.5">
 		<div class="flex items-center gap-1.5">
-			{#if data.isTailscale}
+			{#if data.isVIPService}
+				<div class="h-2 w-2 animate-pulse rounded-full bg-node-vip"></div>
+				<span class="text-xs text-node-vip">VIP Service</span>
+			{:else if data.isTailscale}
 				<div class="h-2 w-2 animate-pulse rounded-full bg-node-tailscale"></div>
 				<span class="text-xs text-node-tailscale">Tailscale</span>
 			{:else if iconType === 'derp'}
