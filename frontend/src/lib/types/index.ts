@@ -108,3 +108,64 @@ export interface UIState {
 	isLoading: boolean;
 	error: string | null;
 }
+
+// Stats types
+export interface PortStat {
+	port: number;
+	proto: number;
+	bytes: number;
+}
+
+export interface TrafficStatsBucket {
+	bucket: number;
+	tcpBytes: number;
+	udpBytes: number;
+	otherProtoBytes: number;
+	virtualBytes: number;
+	subnetBytes: number;
+	physicalBytes: number;
+	totalFlows: number;
+	uniquePairs: number;
+	topPorts: string;
+}
+
+export interface TrafficStatsSummary {
+	tcpBytes: number;
+	udpBytes: number;
+	otherProtoBytes: number;
+	virtualBytes: number;
+	subnetBytes: number;
+	physicalBytes: number;
+	totalFlows: number;
+	uniquePairs: number;
+}
+
+export interface TopTalker {
+	nodeId: string;
+	displayName?: string;
+	txBytes: number;
+	rxBytes: number;
+	totalBytes: number;
+}
+
+export interface TopPair {
+	srcNodeId: string;
+	srcDisplayName?: string;
+	dstNodeId: string;
+	dstDisplayName?: string;
+	txBytes: number;
+	rxBytes: number;
+	totalBytes: number;
+	flowCount: number;
+}
+
+export interface NodeDetailStats {
+	nodeId: string;
+	totalTx: number;
+	totalRx: number;
+	tcpBytes: number;
+	udpBytes: number;
+	otherBytes: number;
+	topPeers: TopPair[];
+	topPorts: PortStat[];
+}

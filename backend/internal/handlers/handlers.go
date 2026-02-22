@@ -703,3 +703,289 @@ func (h *Handlers) GetDNSNameservers(c *gin.Context) {
 
 	c.JSON(http.StatusOK, nameservers)
 }
+
+// parseTimeRange extracts and validates start/end query params.
+// Defaults: start = 1 hour ago, end = now.
+func (h *Handlers) parseTimeRange(c *gin.Context) (time.Time, time.Time, error) {
+	var startTime, endTime time.Time
+	var err error
+
+	if s := c.Query("start"); s != "" {
+		startTime, err = time.Parse(time.RFC3339, s)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid start time: %w", err)
+		}
+	} else {
+		startTime = time.Now().Add(-1 * time.Hour)
+	}
+
+	if e := c.Query("end"); e != "" {
+		endTime, err = time.Parse(time.RFC3339, e)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid end time: %w", err)
+		}
+	} else {
+		endTime = time.Now()
+	}
+
+	if endTime.Before(startTime) {
+		return time.Time{}, time.Time{}, fmt.Errorf("end time before start time")
+	}
+
+	return startTime, endTime, nil
+}
+
+// GetStatsOverview returns network-wide statistics for a time range
+func (h *Handlers) GetStatsOverview(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not configured"})
+		return
+	}
+
+	startTime, endTime, err := h.parseTimeRange(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var buckets []database.TrafficStats
+	source := "database"
+
+	// Try rolling cache first for recent data
+	duration := endTime.Sub(startTime)
+	if h.poller != nil && duration <= time.Hour {
+		cache := h.poller.GetRollingCache()
+		if cache.HasDataFor(startTime, endTime) {
+			buckets = cache.GetTrafficStats(startTime, endTime)
+			source = "cache"
+		}
+	}
+
+	// Fall back to database
+	if len(buckets) == 0 {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), AggregationQueryTimeout)
+		defer cancel()
+
+		buckets, err = h.store.GetTrafficStats(ctx, startTime, endTime)
+		if err != nil {
+			log.Printf("ERROR GetStatsOverview: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "Failed to fetch traffic stats",
+				"message": err.Error(),
+			})
+			return
+		}
+		source = "database"
+	}
+
+	// Aggregate buckets into summary
+	var tcpBytes, udpBytes, otherProtoBytes int64
+	var virtualBytes, subnetBytes, physicalBytes int64
+	var totalFlows, maxUniquePairs int64
+	for _, b := range buckets {
+		tcpBytes += b.TCPBytes
+		udpBytes += b.UDPBytes
+		otherProtoBytes += b.OtherProtoBytes
+		virtualBytes += b.VirtualBytes
+		subnetBytes += b.SubnetBytes
+		physicalBytes += b.PhysicalBytes
+		totalFlows += b.TotalFlows
+		if b.UniquePairs > maxUniquePairs {
+			maxUniquePairs = b.UniquePairs
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"summary": gin.H{
+			"tcpBytes":        tcpBytes,
+			"udpBytes":        udpBytes,
+			"otherProtoBytes": otherProtoBytes,
+			"virtualBytes":    virtualBytes,
+			"subnetBytes":     subnetBytes,
+			"physicalBytes":   physicalBytes,
+			"totalFlows":      totalFlows,
+			"uniquePairs":     maxUniquePairs,
+		},
+		"buckets": buckets,
+		"metadata": gin.H{
+			"start":       startTime,
+			"end":         endTime,
+			"bucketCount": len(buckets),
+			"source":      source,
+		},
+	})
+}
+
+// resolveNodeName returns a human-readable name for a node ID using the device cache.
+func (h *Handlers) resolveNodeName(nodeID string) string {
+	if h.poller == nil {
+		return ""
+	}
+	cache := h.poller.GetDeviceCache()
+	if entry := cache.GetDevice(nodeID); entry != nil {
+		// Prefer hostname, fall back to full name
+		if entry.Hostname != "" {
+			return entry.Hostname
+		}
+		return entry.Name
+	}
+	return ""
+}
+
+// GetTopTalkers returns the top N nodes by total traffic
+func (h *Handlers) GetTopTalkers(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not configured"})
+		return
+	}
+
+	startTime, endTime, err := h.parseTimeRange(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	limit := 10
+	if l := c.Query("limit"); l != "" {
+		if _, err := fmt.Sscanf(l, "%d", &limit); err != nil || limit <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+			return
+		}
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
+	defer cancel()
+
+	talkers, err := h.store.GetTopTalkers(ctx, startTime, endTime, limit)
+	if err != nil {
+		log.Printf("ERROR GetTopTalkers: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to fetch top talkers",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Enrich with device names
+	enriched := make([]gin.H, 0, len(talkers))
+	for _, t := range talkers {
+		enriched = append(enriched, gin.H{
+			"nodeId":      t.NodeID,
+			"displayName": h.resolveNodeName(t.NodeID),
+			"txBytes":     t.TxBytes,
+			"rxBytes":     t.RxBytes,
+			"totalBytes":  t.TotalBytes,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"talkers": enriched,
+		"metadata": gin.H{
+			"start": startTime,
+			"end":   endTime,
+			"limit": limit,
+			"count": len(enriched),
+		},
+	})
+}
+
+// GetTopPairs returns the top N node pairs by total traffic
+func (h *Handlers) GetTopPairs(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not configured"})
+		return
+	}
+
+	startTime, endTime, err := h.parseTimeRange(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	limit := 10
+	if l := c.Query("limit"); l != "" {
+		if _, err := fmt.Sscanf(l, "%d", &limit); err != nil || limit <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+			return
+		}
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
+	defer cancel()
+
+	pairs, err := h.store.GetTopPairs(ctx, startTime, endTime, limit)
+	if err != nil {
+		log.Printf("ERROR GetTopPairs: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to fetch top pairs",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Enrich with device names
+	enriched := make([]gin.H, 0, len(pairs))
+	for _, p := range pairs {
+		enriched = append(enriched, gin.H{
+			"srcNodeId":      p.SrcNodeID,
+			"srcDisplayName": h.resolveNodeName(p.SrcNodeID),
+			"dstNodeId":      p.DstNodeID,
+			"dstDisplayName": h.resolveNodeName(p.DstNodeID),
+			"txBytes":        p.TxBytes,
+			"rxBytes":        p.RxBytes,
+			"totalBytes":     p.TotalBytes,
+			"flowCount":      p.FlowCount,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"pairs": enriched,
+		"metadata": gin.H{
+			"start": startTime,
+			"end":   endTime,
+			"limit": limit,
+			"count": len(enriched),
+		},
+	})
+}
+
+// GetNodeDetailStats returns detailed stats for a specific node
+func (h *Handlers) GetNodeDetailStats(c *gin.Context) {
+	if h.store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not configured"})
+		return
+	}
+
+	nodeID := c.Param("id")
+	if nodeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "node ID required"})
+		return
+	}
+
+	startTime, endTime, err := h.parseTimeRange(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), DefaultQueryTimeout)
+	defer cancel()
+
+	stats, err := h.store.GetNodeStats(ctx, nodeID, startTime, endTime)
+	if err != nil {
+		log.Printf("ERROR GetNodeDetailStats: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to fetch node stats",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
+}

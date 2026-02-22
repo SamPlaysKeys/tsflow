@@ -1,5 +1,5 @@
 import { api } from './api-service';
-import type { Device, NetworkLogsResponse } from '$lib/types';
+import type { Device, NetworkLogsResponse, TrafficStatsBucket, TrafficStatsSummary, TopTalker, TopPair, NodeDetailStats } from '$lib/types';
 
 export interface DevicesResponse {
 	devices: Device[];
@@ -174,5 +174,39 @@ export const tailscaleService = {
 			}
 		}
 		return api.get<BandwidthResponse>(url);
+	},
+
+	async getStatsOverview(start: Date, end: Date): Promise<{
+		summary: TrafficStatsSummary;
+		buckets: TrafficStatsBucket[];
+		metadata: { start: string; end: string; bucketCount: number; source: string };
+	}> {
+		const startISO = start.toISOString();
+		const endISO = end.toISOString();
+		return api.get(`/stats/overview?start=${startISO}&end=${endISO}`);
+	},
+
+	async getTopTalkers(start: Date, end: Date, limit = 10): Promise<{
+		talkers: TopTalker[];
+		metadata: { start: string; end: string; limit: number; count: number };
+	}> {
+		const startISO = start.toISOString();
+		const endISO = end.toISOString();
+		return api.get(`/stats/top-talkers?start=${startISO}&end=${endISO}&limit=${limit}`);
+	},
+
+	async getTopPairs(start: Date, end: Date, limit = 10): Promise<{
+		pairs: TopPair[];
+		metadata: { start: string; end: string; limit: number; count: number };
+	}> {
+		const startISO = start.toISOString();
+		const endISO = end.toISOString();
+		return api.get(`/stats/top-pairs?start=${startISO}&end=${endISO}&limit=${limit}`);
+	},
+
+	async getNodeStats(nodeId: string, start: Date, end: Date): Promise<NodeDetailStats> {
+		const startISO = start.toISOString();
+		const endISO = end.toISOString();
+		return api.get(`/stats/node/${encodeURIComponent(nodeId)}?start=${startISO}&end=${endISO}`);
 	}
 };

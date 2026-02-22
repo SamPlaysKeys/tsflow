@@ -179,6 +179,16 @@ func main() {
 		api.GET("/flow-logs/range", handlerService.GetDataRange)
 		api.GET("/bandwidth", histCache, handlerService.GetBandwidthAggregated)
 
+		// Stats endpoints - longer cache for aggregated analytics
+		statsCache := middleware.CacheMiddleware(middleware.LongCacheConfig())
+		stats := api.Group("/stats")
+		{
+			stats.GET("/overview", statsCache, handlerService.GetStatsOverview)
+			stats.GET("/top-talkers", statsCache, handlerService.GetTopTalkers)
+			stats.GET("/top-pairs", statsCache, handlerService.GetTopPairs)
+			stats.GET("/node/:id", statsCache, handlerService.GetNodeDetailStats)
+		}
+
 		// Status endpoints - no cache
 		noCache := middleware.CacheMiddleware(middleware.NoCacheConfig())
 		api.GET("/poller/status", noCache, handlerService.GetPollerStatus)
