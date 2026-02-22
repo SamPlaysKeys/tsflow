@@ -3,8 +3,10 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -40,6 +42,57 @@ type NodeBandwidth struct {
 	NodeID  string `json:"nodeId"`
 	TxBytes int64  `json:"txBytes"`
 	RxBytes int64  `json:"rxBytes"`
+}
+
+// TrafficStats represents network-wide statistics for a time bucket
+type TrafficStats struct {
+	Bucket          int64  `json:"bucket"`
+	TCPBytes        int64  `json:"tcpBytes"`
+	UDPBytes        int64  `json:"udpBytes"`
+	OtherProtoBytes int64  `json:"otherProtoBytes"`
+	VirtualBytes    int64  `json:"virtualBytes"`
+	SubnetBytes     int64  `json:"subnetBytes"`
+	PhysicalBytes   int64  `json:"physicalBytes"`
+	TotalFlows      int64  `json:"totalFlows"`
+	UniquePairs     int64  `json:"uniquePairs"`
+	TopPorts        string `json:"topPorts"`
+}
+
+// TopTalker represents a node ranked by total traffic volume
+type TopTalker struct {
+	NodeID     string `json:"nodeId"`
+	TxBytes    int64  `json:"txBytes"`
+	RxBytes    int64  `json:"rxBytes"`
+	TotalBytes int64  `json:"totalBytes"`
+}
+
+// TopPair represents a node-to-node pair ranked by total traffic volume
+type TopPair struct {
+	SrcNodeID  string `json:"srcNodeId"`
+	DstNodeID  string `json:"dstNodeId"`
+	TxBytes    int64  `json:"txBytes"`
+	RxBytes    int64  `json:"rxBytes"`
+	TotalBytes int64  `json:"totalBytes"`
+	FlowCount  int64  `json:"flowCount"`
+}
+
+// PortStat represents traffic volume for a specific port/protocol
+type PortStat struct {
+	Port  int   `json:"port"`
+	Proto int   `json:"proto"`
+	Bytes int64 `json:"bytes"`
+}
+
+// NodeDetailStats represents detailed traffic statistics for a single node
+type NodeDetailStats struct {
+	NodeID     string     `json:"nodeId"`
+	TotalTx    int64      `json:"totalTx"`
+	TotalRx    int64      `json:"totalRx"`
+	TCPBytes   int64      `json:"tcpBytes"`
+	UDPBytes   int64      `json:"udpBytes"`
+	OtherBytes int64      `json:"otherBytes"`
+	TopPeers   []TopPair  `json:"topPeers"`
+	TopPorts   []PortStat `json:"topPorts"`
 }
 
 // PollState tracks the polling state
@@ -91,6 +144,13 @@ type Store interface {
 	UpsertNodeBandwidth(ctx context.Context, buckets []NodeBandwidth, bucketSize int64) error
 	GetBandwidth(ctx context.Context, start, end time.Time) ([]BandwidthBucket, error)
 	GetNodeBandwidth(ctx context.Context, start, end time.Time, nodeID string) ([]BandwidthBucket, error)
+
+	// Traffic stats operations
+	UpsertTrafficStats(ctx context.Context, stats []TrafficStats) error
+	GetTrafficStats(ctx context.Context, start, end time.Time) ([]TrafficStats, error)
+	GetTopTalkers(ctx context.Context, start, end time.Time, limit int) ([]TopTalker, error)
+	GetTopPairs(ctx context.Context, start, end time.Time, limit int) ([]TopPair, error)
+	GetNodeStats(ctx context.Context, nodeID string, start, end time.Time) (*NodeDetailStats, error)
 
 	// State operations
 	GetPollState(ctx context.Context) (*PollState, error)
@@ -244,6 +304,46 @@ func (s *SQLiteStore) Init(ctx context.Context) error {
 		PRIMARY KEY (bucket, node_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_bandwidth_node_daily_node ON bandwidth_by_node_daily(node_id, bucket);
+
+	-- Network-wide traffic statistics rollups
+	CREATE TABLE IF NOT EXISTS traffic_stats_minutely (
+		bucket INTEGER PRIMARY KEY,
+		tcp_bytes INTEGER DEFAULT 0,
+		udp_bytes INTEGER DEFAULT 0,
+		other_proto_bytes INTEGER DEFAULT 0,
+		virtual_bytes INTEGER DEFAULT 0,
+		subnet_bytes INTEGER DEFAULT 0,
+		physical_bytes INTEGER DEFAULT 0,
+		total_flows INTEGER DEFAULT 0,
+		unique_pairs INTEGER DEFAULT 0,
+		top_ports TEXT DEFAULT '[]'
+	);
+
+	CREATE TABLE IF NOT EXISTS traffic_stats_hourly (
+		bucket INTEGER PRIMARY KEY,
+		tcp_bytes INTEGER DEFAULT 0,
+		udp_bytes INTEGER DEFAULT 0,
+		other_proto_bytes INTEGER DEFAULT 0,
+		virtual_bytes INTEGER DEFAULT 0,
+		subnet_bytes INTEGER DEFAULT 0,
+		physical_bytes INTEGER DEFAULT 0,
+		total_flows INTEGER DEFAULT 0,
+		unique_pairs INTEGER DEFAULT 0,
+		top_ports TEXT DEFAULT '[]'
+	);
+
+	CREATE TABLE IF NOT EXISTS traffic_stats_daily (
+		bucket INTEGER PRIMARY KEY,
+		tcp_bytes INTEGER DEFAULT 0,
+		udp_bytes INTEGER DEFAULT 0,
+		other_proto_bytes INTEGER DEFAULT 0,
+		virtual_bytes INTEGER DEFAULT 0,
+		subnet_bytes INTEGER DEFAULT 0,
+		physical_bytes INTEGER DEFAULT 0,
+		total_flows INTEGER DEFAULT 0,
+		unique_pairs INTEGER DEFAULT 0,
+		top_ports TEXT DEFAULT '[]'
+	);
 
 	-- Poll state tracking
 	CREATE TABLE IF NOT EXISTS poll_state (
@@ -426,7 +526,9 @@ func (s *SQLiteStore) UpsertNodePairAggregates(ctx context.Context, aggregates [
 				rx_bytes = rx_bytes + excluded.rx_bytes,
 				tx_pkts = tx_pkts + excluded.tx_pkts,
 				rx_pkts = rx_pkts + excluded.rx_pkts,
-				flow_count = flow_count + excluded.flow_count
+				flow_count = flow_count + excluded.flow_count,
+				protocols = excluded.protocols,
+				ports = excluded.ports
 		`, table))
 		if err != nil {
 			return fmt.Errorf("failed to prepare statement for %s: %w", table, err)
@@ -807,7 +909,7 @@ func (s *SQLiteStore) Cleanup(ctx context.Context, retentionMinutely, retentionH
 
 	// Clean up minutely tables
 	minutelyCutoff := now - int64(retentionMinutely.Seconds())
-	for _, table := range []string{"node_pairs_minutely", "bandwidth_minutely", "bandwidth_by_node_minutely"} {
+	for _, table := range []string{"node_pairs_minutely", "bandwidth_minutely", "bandwidth_by_node_minutely", "traffic_stats_minutely"} {
 		result, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE bucket < ?", table), minutelyCutoff)
 		if err != nil {
 			log.Printf("Warning: failed to cleanup %s: %v", table, err)
@@ -820,7 +922,7 @@ func (s *SQLiteStore) Cleanup(ctx context.Context, retentionMinutely, retentionH
 
 	// Clean up hourly tables
 	hourlyCutoff := now - int64(retentionHourly.Seconds())
-	for _, table := range []string{"node_pairs_hourly", "bandwidth_hourly", "bandwidth_by_node_hourly"} {
+	for _, table := range []string{"node_pairs_hourly", "bandwidth_hourly", "bandwidth_by_node_hourly", "traffic_stats_hourly"} {
 		result, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE bucket < ?", table), hourlyCutoff)
 		if err != nil {
 			log.Printf("Warning: failed to cleanup %s: %v", table, err)
@@ -834,7 +936,7 @@ func (s *SQLiteStore) Cleanup(ctx context.Context, retentionMinutely, retentionH
 	// Clean up daily tables (if retention specified)
 	if retentionDaily > 0 {
 		dailyCutoff := now - int64(retentionDaily.Seconds())
-		for _, table := range []string{"node_pairs_daily", "bandwidth_daily", "bandwidth_by_node_daily"} {
+		for _, table := range []string{"node_pairs_daily", "bandwidth_daily", "bandwidth_by_node_daily", "traffic_stats_daily"} {
 			result, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE bucket < ?", table), dailyCutoff)
 			if err != nil {
 				log.Printf("Warning: failed to cleanup %s: %v", table, err)
@@ -872,6 +974,7 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (map[string]any, error) {
 		"node_pairs_minutely", "node_pairs_hourly", "node_pairs_daily",
 		"bandwidth_minutely", "bandwidth_hourly", "bandwidth_daily",
 		"bandwidth_by_node_minutely", "bandwidth_by_node_hourly", "bandwidth_by_node_daily",
+		"traffic_stats_minutely", "traffic_stats_hourly", "traffic_stats_daily",
 	}
 
 	tableCounts := make(map[string]int64)
@@ -909,6 +1012,381 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (map[string]any, error) {
 	stats["dataRange"] = dataRange
 
 	return stats, nil
+}
+
+// UpsertTrafficStats upserts network-wide traffic statistics into tiered tables
+func (s *SQLiteStore) UpsertTrafficStats(ctx context.Context, stats []TrafficStats) error {
+	if len(stats) == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	tables := []string{"traffic_stats_minutely", "traffic_stats_hourly", "traffic_stats_daily"}
+	bucketSizes := []int64{60, 3600, 86400}
+
+	for i, table := range tables {
+		bs := bucketSizes[i]
+		stmt, err := tx.PrepareContext(ctx, fmt.Sprintf(`
+			INSERT INTO %s (bucket, tcp_bytes, udp_bytes, other_proto_bytes, virtual_bytes, subnet_bytes, physical_bytes, total_flows, unique_pairs, top_ports)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(bucket) DO UPDATE SET
+				tcp_bytes = tcp_bytes + excluded.tcp_bytes,
+				udp_bytes = udp_bytes + excluded.udp_bytes,
+				other_proto_bytes = other_proto_bytes + excluded.other_proto_bytes,
+				virtual_bytes = virtual_bytes + excluded.virtual_bytes,
+				subnet_bytes = subnet_bytes + excluded.subnet_bytes,
+				physical_bytes = physical_bytes + excluded.physical_bytes,
+				total_flows = total_flows + excluded.total_flows,
+				unique_pairs = excluded.unique_pairs,
+				top_ports = excluded.top_ports
+		`, table))
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement for %s: %w", table, err)
+		}
+		err = func() error {
+			defer stmt.Close()
+			for _, st := range stats {
+				bucket := (st.Bucket / bs) * bs
+				_, err := stmt.ExecContext(ctx,
+					bucket, st.TCPBytes, st.UDPBytes, st.OtherProtoBytes,
+					st.VirtualBytes, st.SubnetBytes, st.PhysicalBytes,
+					st.TotalFlows, st.UniquePairs, st.TopPorts,
+				)
+				if err != nil {
+					return fmt.Errorf("failed to upsert traffic stats: %w", err)
+				}
+			}
+			return nil
+		}()
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetTrafficStats retrieves network-wide traffic statistics for a time range
+func (s *SQLiteStore) GetTrafficStats(ctx context.Context, start, end time.Time) ([]TrafficStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	startUnix := start.UTC().Unix()
+	endUnix := end.UTC().Unix()
+
+	if startUnix >= endUnix {
+		return nil, fmt.Errorf("invalid time range: start (%v) must be before end (%v)", start, end)
+	}
+
+	rangeSeconds := endUnix - startUnix
+
+	var table string
+	switch {
+	case rangeSeconds <= 24*3600:
+		table = "traffic_stats_minutely"
+	case rangeSeconds <= 7*24*3600:
+		table = "traffic_stats_hourly"
+	default:
+		table = "traffic_stats_daily"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT bucket, tcp_bytes, udp_bytes, other_proto_bytes,
+		       virtual_bytes, subnet_bytes, physical_bytes,
+		       total_flows, unique_pairs, top_ports
+		FROM %s
+		WHERE bucket >= ? AND bucket <= ?
+		ORDER BY bucket ASC
+	`, table)
+
+	rows, err := s.db.QueryContext(ctx, query, startUnix, endUnix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query traffic stats: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]TrafficStats, 0)
+	for rows.Next() {
+		var st TrafficStats
+		err := rows.Scan(
+			&st.Bucket, &st.TCPBytes, &st.UDPBytes, &st.OtherProtoBytes,
+			&st.VirtualBytes, &st.SubnetBytes, &st.PhysicalBytes,
+			&st.TotalFlows, &st.UniquePairs, &st.TopPorts,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan traffic stats: %w", err)
+		}
+		results = append(results, st)
+	}
+
+	return results, rows.Err()
+}
+
+// GetTopTalkers returns nodes ranked by total traffic volume
+func (s *SQLiteStore) GetTopTalkers(ctx context.Context, start, end time.Time, limit int) ([]TopTalker, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	startUnix := start.UTC().Unix()
+	endUnix := end.UTC().Unix()
+
+	if startUnix >= endUnix {
+		return nil, fmt.Errorf("invalid time range: start (%v) must be before end (%v)", start, end)
+	}
+
+	rangeSeconds := endUnix - startUnix
+
+	var table string
+	switch {
+	case rangeSeconds <= 24*3600:
+		table = "bandwidth_by_node_minutely"
+	case rangeSeconds <= 7*24*3600:
+		table = "bandwidth_by_node_hourly"
+	default:
+		table = "bandwidth_by_node_daily"
+	}
+
+	if limit <= 0 {
+		limit = 10
+	}
+
+	query := fmt.Sprintf(`
+		SELECT node_id, SUM(tx_bytes), SUM(rx_bytes), SUM(tx_bytes + rx_bytes) as total
+		FROM %s
+		WHERE bucket >= ? AND bucket <= ?
+		GROUP BY node_id
+		ORDER BY total DESC
+		LIMIT ?
+	`, table)
+
+	rows, err := s.db.QueryContext(ctx, query, startUnix, endUnix, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query top talkers: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]TopTalker, 0)
+	for rows.Next() {
+		var t TopTalker
+		err := rows.Scan(&t.NodeID, &t.TxBytes, &t.RxBytes, &t.TotalBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan top talker: %w", err)
+		}
+		results = append(results, t)
+	}
+
+	return results, rows.Err()
+}
+
+// GetTopPairs returns node pairs ranked by total traffic volume
+func (s *SQLiteStore) GetTopPairs(ctx context.Context, start, end time.Time, limit int) ([]TopPair, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	startUnix := start.UTC().Unix()
+	endUnix := end.UTC().Unix()
+
+	if startUnix >= endUnix {
+		return nil, fmt.Errorf("invalid time range: start (%v) must be before end (%v)", start, end)
+	}
+
+	rangeSeconds := endUnix - startUnix
+
+	var table string
+	switch {
+	case rangeSeconds <= 24*3600:
+		table = "node_pairs_minutely"
+	case rangeSeconds <= 7*24*3600:
+		table = "node_pairs_hourly"
+	default:
+		table = "node_pairs_daily"
+	}
+
+	if limit <= 0 {
+		limit = 10
+	}
+
+	query := fmt.Sprintf(`
+		SELECT src_node_id, dst_node_id, SUM(tx_bytes), SUM(rx_bytes),
+		       SUM(tx_bytes + rx_bytes) as total, SUM(flow_count)
+		FROM %s
+		WHERE bucket >= ? AND bucket <= ?
+		GROUP BY src_node_id, dst_node_id
+		ORDER BY total DESC
+		LIMIT ?
+	`, table)
+
+	rows, err := s.db.QueryContext(ctx, query, startUnix, endUnix, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query top pairs: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]TopPair, 0)
+	for rows.Next() {
+		var p TopPair
+		err := rows.Scan(&p.SrcNodeID, &p.DstNodeID, &p.TxBytes, &p.RxBytes, &p.TotalBytes, &p.FlowCount)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan top pair: %w", err)
+		}
+		results = append(results, p)
+	}
+
+	return results, rows.Err()
+}
+
+// GetNodeStats returns detailed traffic statistics for a single node
+func (s *SQLiteStore) GetNodeStats(ctx context.Context, nodeID string, start, end time.Time) (*NodeDetailStats, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	startUnix := start.UTC().Unix()
+	endUnix := end.UTC().Unix()
+
+	if startUnix >= endUnix {
+		return nil, fmt.Errorf("invalid time range: start (%v) must be before end (%v)", start, end)
+	}
+
+	rangeSeconds := endUnix - startUnix
+
+	var bwTable, pairsTable string
+	switch {
+	case rangeSeconds <= 24*3600:
+		bwTable = "bandwidth_by_node_minutely"
+		pairsTable = "node_pairs_minutely"
+	case rangeSeconds <= 7*24*3600:
+		bwTable = "bandwidth_by_node_hourly"
+		pairsTable = "node_pairs_hourly"
+	default:
+		bwTable = "bandwidth_by_node_daily"
+		pairsTable = "node_pairs_daily"
+	}
+
+	result := &NodeDetailStats{
+		NodeID:   nodeID,
+		TopPeers: make([]TopPair, 0),
+		TopPorts: make([]PortStat, 0),
+	}
+
+	// Get total TX/RX from bandwidth_by_node
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT COALESCE(SUM(tx_bytes), 0), COALESCE(SUM(rx_bytes), 0)
+		FROM %s
+		WHERE node_id = ? AND bucket >= ? AND bucket <= ?
+	`, bwTable), nodeID, startUnix, endUnix).Scan(&result.TotalTx, &result.TotalRx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query node bandwidth: %w", err)
+	}
+
+	// Get top peers from node_pairs (where this node is src or dst)
+	peerQuery := fmt.Sprintf(`
+		SELECT peer_id, SUM(tx), SUM(rx), SUM(tx + rx) as total, SUM(fc)
+		FROM (
+			SELECT dst_node_id as peer_id, SUM(tx_bytes) as tx, SUM(rx_bytes) as rx, SUM(flow_count) as fc
+			FROM %s
+			WHERE src_node_id = ? AND bucket >= ? AND bucket <= ?
+			GROUP BY dst_node_id
+			UNION ALL
+			SELECT src_node_id as peer_id, SUM(rx_bytes) as tx, SUM(tx_bytes) as rx, SUM(flow_count) as fc
+			FROM %s
+			WHERE dst_node_id = ? AND bucket >= ? AND bucket <= ?
+			GROUP BY src_node_id
+		)
+		GROUP BY peer_id
+		ORDER BY total DESC
+		LIMIT 10
+	`, pairsTable, pairsTable)
+
+	rows, err := s.db.QueryContext(ctx, peerQuery,
+		nodeID, startUnix, endUnix,
+		nodeID, startUnix, endUnix,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query node peers: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var p TopPair
+		err := rows.Scan(&p.DstNodeID, &p.TxBytes, &p.RxBytes, &p.TotalBytes, &p.FlowCount)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan peer: %w", err)
+		}
+		p.SrcNodeID = nodeID
+		result.TopPeers = append(result.TopPeers, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Get protocol breakdown and top ports from node_pairs ports column
+	portsQuery := fmt.Sprintf(`
+		SELECT ports
+		FROM %s
+		WHERE (src_node_id = ? OR dst_node_id = ?)
+			AND bucket >= ? AND bucket <= ?
+			AND ports != '[]'
+	`, pairsTable)
+
+	portRows, err := s.db.QueryContext(ctx, portsQuery, nodeID, nodeID, startUnix, endUnix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query node ports: %w", err)
+	}
+	defer portRows.Close()
+
+	// Aggregate ports and protocol bytes across all pairs for this node
+	type protoPortKey struct {
+		proto int
+		port  int
+	}
+	portAgg := make(map[protoPortKey]int64)
+
+	for portRows.Next() {
+		var portsJSON string
+		if err := portRows.Scan(&portsJSON); err != nil {
+			continue
+		}
+		var entries []PortStat
+		if err := json.Unmarshal([]byte(portsJSON), &entries); err != nil {
+			continue
+		}
+		for _, e := range entries {
+			portAgg[protoPortKey{proto: e.Proto, port: e.Port}] += e.Bytes
+		}
+	}
+
+	// Compute protocol totals
+	for ppk, bytes := range portAgg {
+		switch ppk.proto {
+		case 6:
+			result.TCPBytes += bytes
+		case 17:
+			result.UDPBytes += bytes
+		default:
+			result.OtherBytes += bytes
+		}
+	}
+
+	// Build top ports list (top 15 by bytes)
+	for ppk, bytes := range portAgg {
+		result.TopPorts = append(result.TopPorts, PortStat{Port: ppk.port, Proto: ppk.proto, Bytes: bytes})
+	}
+	sort.Slice(result.TopPorts, func(i, j int) bool {
+		return result.TopPorts[i].Bytes > result.TopPorts[j].Bytes
+	})
+	if len(result.TopPorts) > 15 {
+		result.TopPorts = result.TopPorts[:15]
+	}
+
+	return result, nil
 }
 
 // parseTime parses a time string from SQLite

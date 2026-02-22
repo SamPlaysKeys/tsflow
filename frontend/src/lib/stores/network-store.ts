@@ -144,8 +144,10 @@ export const filteredEdges = derived(
 );
 
 // Network stats
+// Use edge-based totalBytes to avoid double-counting (each byte appears on both
+// the sending and receiving node, but only once on the edge connecting them)
 export const networkStats = derived([filteredNodes, filteredEdges], ([$nodes, $edges]) => {
-	const totalBytes = $nodes.reduce((sum, n) => sum + n.totalBytes, 0);
+	const totalBytes = $edges.reduce((sum, e) => sum + e.totalBytes, 0);
 	const totalConnections = $edges.length;
 	const tailscaleNodes = $nodes.filter((n) => n.isTailscale).length;
 	const externalNodes = $nodes.length - tailscaleNodes;

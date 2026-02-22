@@ -87,10 +87,10 @@ export const queryTimeWindow = derived(dataSourceStore, ($store) => {
 			end: $store.selectedEnd
 		};
 	}
-	// For live mode, use current time minus 5 minutes
+	// For live mode, use current time minus 1 hour (analytics uses this window)
 	const now = new Date();
 	return {
-		start: new Date(now.getTime() - 5 * 60 * 1000),
+		start: new Date(now.getTime() - 60 * 60 * 1000),
 		end: now
 	};
 });

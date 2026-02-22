@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"sort"
 	"strings"
@@ -128,6 +129,9 @@ type RollingWindowCache struct {
 	// Per-node bandwidth by (bucket, nodeID)
 	nodeBandwidth map[int64]map[string]*database.NodeBandwidth
 
+	// Network-wide traffic stats by minute bucket
+	trafficStats map[int64]*database.TrafficStats
+
 	// Maximum age of cached data (default 1 hour)
 	maxAge time.Duration
 }
@@ -137,6 +141,7 @@ func NewRollingWindowCache(maxAge time.Duration) *RollingWindowCache {
 		nodePairs:     make(map[int64][]database.NodePairAggregate),
 		bandwidth:     make(map[int64]*database.BandwidthBucket),
 		nodeBandwidth: make(map[int64]map[string]*database.NodeBandwidth),
+		trafficStats:  make(map[int64]*database.TrafficStats),
 		maxAge:        maxAge,
 	}
 }
@@ -146,6 +151,7 @@ func (c *RollingWindowCache) Update(
 	nodePairs []database.NodePairAggregate,
 	bandwidth []database.BandwidthBucket,
 	nodeBandwidth []database.NodeBandwidth,
+	trafficStats []database.TrafficStats,
 ) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -189,6 +195,24 @@ func (c *RollingWindowCache) Update(
 		}
 	}
 
+	// Add traffic stats by bucket (additive for byte/flow counters, replace for uniquePairs/topPorts)
+	for _, ts := range trafficStats {
+		if existing, ok := c.trafficStats[ts.Bucket]; ok {
+			existing.TCPBytes += ts.TCPBytes
+			existing.UDPBytes += ts.UDPBytes
+			existing.OtherProtoBytes += ts.OtherProtoBytes
+			existing.VirtualBytes += ts.VirtualBytes
+			existing.SubnetBytes += ts.SubnetBytes
+			existing.PhysicalBytes += ts.PhysicalBytes
+			existing.TotalFlows += ts.TotalFlows
+			existing.UniquePairs = ts.UniquePairs // replace: latest snapshot
+			existing.TopPorts = ts.TopPorts       // replace: latest snapshot
+		} else {
+			copied := ts
+			c.trafficStats[ts.Bucket] = &copied
+		}
+	}
+
 	// Prune old data
 	c.prune()
 }
@@ -212,6 +236,12 @@ func (c *RollingWindowCache) prune() {
 	for bucket := range c.nodeBandwidth {
 		if bucket < cutoff {
 			delete(c.nodeBandwidth, bucket)
+		}
+	}
+
+	for bucket := range c.trafficStats {
+		if bucket < cutoff {
+			delete(c.trafficStats, bucket)
 		}
 	}
 }
@@ -281,6 +311,28 @@ func (c *RollingWindowCache) GetNodeBandwidth(start, end time.Time, nodeID strin
 	// Sort by time ascending
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].Time.Before(result[j].Time)
+	})
+
+	return result
+}
+
+// GetTrafficStats returns cached traffic stats for a time range (sorted by bucket)
+func (c *RollingWindowCache) GetTrafficStats(start, end time.Time) []database.TrafficStats {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	startUnix := start.Unix()
+	endUnix := end.Unix()
+	var result []database.TrafficStats
+
+	for bucket, ts := range c.trafficStats {
+		if bucket >= startUnix && bucket <= endUnix {
+			result = append(result, *ts)
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Bucket < result[j].Bucket
 	})
 
 	return result
@@ -513,8 +565,8 @@ func (p *Poller) poll(ctx context.Context) error {
 		return err
 	}
 
-	// Pre-aggregate at poll time: node pairs and bandwidth
-	nodePairs, totalBandwidth, nodeBandwidth := p.aggregate(flowLogs)
+	// Pre-aggregate at poll time: node pairs, bandwidth, and traffic stats
+	nodePairs, totalBandwidth, nodeBandwidth, trafficStats := p.aggregate(flowLogs)
 
 	// Store aggregates
 	if len(nodePairs) > 0 {
@@ -535,8 +587,14 @@ func (p *Poller) poll(ctx context.Context) error {
 		}
 	}
 
+	if len(trafficStats) > 0 {
+		if err := p.store.UpsertTrafficStats(ctx, trafficStats); err != nil {
+			log.Printf("Warning: failed to upsert traffic stats: %v", err)
+		}
+	}
+
 	// Update rolling cache for fast live view queries
-	p.rollingCache.Update(nodePairs, totalBandwidth, nodeBandwidth)
+	p.rollingCache.Update(nodePairs, totalBandwidth, nodeBandwidth, trafficStats)
 
 	// Update poll state
 	if err := p.store.UpdatePollState(ctx, end); err != nil {
@@ -567,6 +625,7 @@ func (p *Poller) aggregate(logs []database.FlowLog) (
 	[]database.NodePairAggregate,
 	[]database.BandwidthBucket,
 	[]database.NodeBandwidth,
+	[]database.TrafficStats,
 ) {
 	// Node pair aggregation: group by (bucket, nodeA, nodeB, trafficType)
 	// where nodeA < nodeB (normalized ordering)
@@ -577,6 +636,31 @@ func (p *Poller) aggregate(logs []database.FlowLog) (
 		trafficType string
 	}
 	nodePairMap := make(map[nodePairKey]*database.NodePairAggregate)
+
+	// Protocol/port tracking per node pair
+	type protoPortKey struct {
+		proto int
+		port  int
+	}
+	type pairProtoData struct {
+		protocols map[int]int64          // proto number -> total bytes
+		ports     map[protoPortKey]int64 // (proto, port) -> total bytes
+	}
+	pairProtoMap := make(map[nodePairKey]*pairProtoData)
+
+	// Network-wide traffic stats accumulator per bucket
+	type trafficStatsAccum struct {
+		tcpBytes        int64
+		udpBytes        int64
+		otherProtoBytes int64
+		virtualBytes    int64
+		subnetBytes     int64
+		physicalBytes   int64
+		totalFlows      int64
+		uniquePairs     map[string]struct{} // "nodeA|nodeB" -> exists
+		ports           map[protoPortKey]int64
+	}
+	trafficStatsMap := make(map[int64]*trafficStatsAccum)
 
 	// Total bandwidth: group by bucket (TX-only to avoid double counting)
 	bandwidthMap := make(map[int64]*database.BandwidthBucket)
@@ -649,6 +733,51 @@ func (p *Poller) aggregate(logs []database.FlowLog) (
 			nodePairMap[npKey] = agg
 		}
 
+		// Track protocols/ports for this node pair
+		ppData, ok := pairProtoMap[npKey]
+		if !ok {
+			ppData = &pairProtoData{
+				protocols: make(map[int]int64),
+				ports:     make(map[protoPortKey]int64),
+			}
+			pairProtoMap[npKey] = ppData
+		}
+		ppData.protocols[log.Protocol] += log.TxBytes
+		if log.DstPort > 0 {
+			ppData.ports[protoPortKey{proto: log.Protocol, port: log.DstPort}] += log.TxBytes
+		}
+
+		// Accumulate network-wide traffic stats
+		tsAccum, ok := trafficStatsMap[bucket]
+		if !ok {
+			tsAccum = &trafficStatsAccum{
+				uniquePairs: make(map[string]struct{}),
+				ports:       make(map[protoPortKey]int64),
+			}
+			trafficStatsMap[bucket] = tsAccum
+		}
+		switch log.Protocol {
+		case 6:
+			tsAccum.tcpBytes += log.TxBytes
+		case 17:
+			tsAccum.udpBytes += log.TxBytes
+		default:
+			tsAccum.otherProtoBytes += log.TxBytes
+		}
+		switch log.TrafficType {
+		case "virtual":
+			tsAccum.virtualBytes += log.TxBytes
+		case "subnet":
+			tsAccum.subnetBytes += log.TxBytes
+		case "physical":
+			tsAccum.physicalBytes += log.TxBytes
+		}
+		tsAccum.totalFlows++
+		tsAccum.uniquePairs[nodeA+"|"+nodeB] = struct{}{}
+		if log.DstPort > 0 {
+			tsAccum.ports[protoPortKey{proto: log.Protocol, port: log.DstPort}] += log.TxBytes
+		}
+
 		// Total bandwidth: TX-only (avoids double counting)
 		// Each byte is transmitted once, so sum of all TX = total traffic
 		if bw, ok := bandwidthMap[bucket]; ok {
@@ -690,6 +819,79 @@ func (p *Poller) aggregate(logs []database.FlowLog) (
 		}
 	}
 
+	// Serialize protocol/port data into node pair aggregates
+	for key, agg := range nodePairMap {
+		if ppData, ok := pairProtoMap[key]; ok {
+			// Protocols: sorted list of unique protocol numbers
+			protos := make([]int, 0, len(ppData.protocols))
+			for p := range ppData.protocols {
+				protos = append(protos, p)
+			}
+			sort.Ints(protos)
+			if b, err := json.Marshal(protos); err == nil {
+				agg.Protocols = string(b)
+			}
+
+			// Ports: top 20 by bytes as [{port, proto, bytes}, ...]
+			type portEntry struct {
+				Port  int   `json:"port"`
+				Proto int   `json:"proto"`
+				Bytes int64 `json:"bytes"`
+			}
+			portEntries := make([]portEntry, 0, len(ppData.ports))
+			for ppk, bytes := range ppData.ports {
+				portEntries = append(portEntries, portEntry{Port: ppk.port, Proto: ppk.proto, Bytes: bytes})
+			}
+			sort.Slice(portEntries, func(i, j int) bool {
+				return portEntries[i].Bytes > portEntries[j].Bytes
+			})
+			if len(portEntries) > 20 {
+				portEntries = portEntries[:20]
+			}
+			if b, err := json.Marshal(portEntries); err == nil {
+				agg.Ports = string(b)
+			}
+		}
+	}
+
+	// Build TrafficStats from accumulated data
+	trafficStats := make([]database.TrafficStats, 0, len(trafficStatsMap))
+	for bucket, accum := range trafficStatsMap {
+		// Top 20 ports by bytes
+		type portEntry struct {
+			Port  int   `json:"port"`
+			Proto int   `json:"proto"`
+			Bytes int64 `json:"bytes"`
+		}
+		portEntries := make([]portEntry, 0, len(accum.ports))
+		for ppk, bytes := range accum.ports {
+			portEntries = append(portEntries, portEntry{Port: ppk.port, Proto: ppk.proto, Bytes: bytes})
+		}
+		sort.Slice(portEntries, func(i, j int) bool {
+			return portEntries[i].Bytes > portEntries[j].Bytes
+		})
+		if len(portEntries) > 20 {
+			portEntries = portEntries[:20]
+		}
+		topPortsJSON := "[]"
+		if b, err := json.Marshal(portEntries); err == nil {
+			topPortsJSON = string(b)
+		}
+
+		trafficStats = append(trafficStats, database.TrafficStats{
+			Bucket:          bucket,
+			TCPBytes:        accum.tcpBytes,
+			UDPBytes:        accum.udpBytes,
+			OtherProtoBytes: accum.otherProtoBytes,
+			VirtualBytes:    accum.virtualBytes,
+			SubnetBytes:     accum.subnetBytes,
+			PhysicalBytes:   accum.physicalBytes,
+			TotalFlows:      accum.totalFlows,
+			UniquePairs:     int64(len(accum.uniquePairs)),
+			TopPorts:        topPortsJSON,
+		})
+	}
+
 	// Convert maps to slices
 	nodePairs := make([]database.NodePairAggregate, 0, len(nodePairMap))
 	for _, agg := range nodePairMap {
@@ -706,7 +908,7 @@ func (p *Poller) aggregate(logs []database.FlowLog) (
 		nodeBandwidth = append(nodeBandwidth, *bw)
 	}
 
-	return nodePairs, totalBandwidth, nodeBandwidth
+	return nodePairs, totalBandwidth, nodeBandwidth, trafficStats
 }
 
 func (p *Poller) cleanup(ctx context.Context) error {

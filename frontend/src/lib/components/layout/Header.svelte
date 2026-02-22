@@ -1,8 +1,11 @@
 <script lang="ts">
-	import { RefreshCw, PanelLeft, ScrollText, Sun, Moon, Monitor, Network, Link, Activity } from 'lucide-svelte';
+	import { RefreshCw, PanelLeft, ScrollText, Sun, Moon, Monitor, Network, Link, Activity, BarChart3 } from 'lucide-svelte';
+	import { page } from '$app/stores';
 	import { uiStore, loadNetworkData, networkStats, filteredNodes, themeStore } from '$lib/stores';
 	import { formatBytes } from '$lib/utils';
 	import type { ThemeMode } from '$lib/stores';
+
+	const currentPath = $derived($page.url.pathname);
 
 	let isRefreshing = $state(false);
 
@@ -62,6 +65,26 @@
 			<Activity class="h-5 w-5 text-primary" />
 			<h1 class="text-lg font-semibold">TSFlow</h1>
 		</div>
+
+		<!-- Navigation -->
+		<nav class="flex items-center gap-1">
+			<a
+				href="/"
+				class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm hover:bg-secondary"
+				class:bg-secondary={currentPath === '/'}
+			>
+				<Network class="h-4 w-4" />
+				<span class="hidden sm:inline">Graph</span>
+			</a>
+			<a
+				href="/analytics"
+				class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm hover:bg-secondary"
+				class:bg-secondary={currentPath === '/analytics'}
+			>
+				<BarChart3 class="h-4 w-4" />
+				<span class="hidden sm:inline">Analytics</span>
+			</a>
+		</nav>
 	</div>
 
 	<!-- Center section: Network Stats -->

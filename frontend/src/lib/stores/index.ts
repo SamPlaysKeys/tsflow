@@ -23,3 +23,15 @@ export {
 	startAutoRefresh,
 	stopAutoRefresh
 } from './network-store';
+export {
+	loadStats,
+	startStatsRefresh,
+	stopStatsRefresh,
+	statsSummary,
+	statsBuckets,
+	topTalkers,
+	topPairs,
+	topPorts,
+	statsLoading,
+	statsError
+} from './stats-store';
