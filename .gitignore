@@ -89,4 +89,7 @@ coverage/
 # Release artifacts
 release/
 *.tar.gz
-checksums.txt 
+checksums.txt
+
+# Git worktrees
+.worktrees/
