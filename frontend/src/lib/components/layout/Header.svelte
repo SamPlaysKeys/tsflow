@@ -47,30 +47,38 @@
 		}
 	}
 
+	function handleFilterToggle() {
+		if (window.innerWidth >= 1024) {
+			uiStore.toggleFilterPanel();
+		} else {
+			uiStore.toggleMobileDrawer();
+		}
+	}
+
 	const ThemeIcon = $derived(getThemeIcon($themeStore));
 </script>
 
-<header class="flex h-14 items-center justify-between border-b border-border bg-card px-4">
-	<!-- Left section: Filter toggle + Logo -->
-	<div class="flex items-center gap-4">
+<header class="flex h-12 items-center justify-between border-b border-border bg-card px-2 sm:h-14 sm:px-4">
+	<!-- Left section: Filter toggle + Logo + Nav -->
+	<div class="flex items-center gap-2 sm:gap-4">
 		<button
-			onclick={() => uiStore.toggleFilterPanel()}
-			class="rounded-md p-2 hover:bg-secondary"
+			onclick={handleFilterToggle}
+			class="rounded-md p-2.5 hover:bg-secondary sm:p-2"
 			title="Toggle filter panel"
 		>
 			<PanelLeft class="h-5 w-5" />
 		</button>
 
-		<div class="flex items-center gap-2">
-			<Activity class="h-5 w-5 text-primary" />
-			<h1 class="text-lg font-semibold">TSFlow</h1>
+		<div class="flex items-center gap-1.5 sm:gap-2">
+			<Activity class="h-4 w-4 text-primary sm:h-5 sm:w-5" />
+			<h1 class="text-base font-semibold sm:text-lg">TSFlow</h1>
 		</div>
 
 		<!-- Navigation -->
-		<nav class="flex items-center gap-1">
+		<nav class="flex items-center gap-0.5 sm:gap-1">
 			<a
 				href="/"
-				class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm hover:bg-secondary"
+				class="flex items-center gap-1.5 rounded-md px-2.5 py-2 text-sm hover:bg-secondary sm:px-3 sm:py-1.5"
 				class:bg-secondary={currentPath === '/'}
 			>
 				<Network class="h-4 w-4" />
@@ -78,7 +86,7 @@
 			</a>
 			<a
 				href="/analytics"
-				class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm hover:bg-secondary"
+				class="flex items-center gap-1.5 rounded-md px-2.5 py-2 text-sm hover:bg-secondary sm:px-3 sm:py-1.5"
 				class:bg-secondary={currentPath === '/analytics'}
 			>
 				<BarChart3 class="h-4 w-4" />
@@ -87,9 +95,8 @@
 		</nav>
 	</div>
 
-	<!-- Center section: Network Stats -->
+	<!-- Center section: Network Stats (desktop only) -->
 	<div class="hidden items-center gap-6 lg:flex">
-		<!-- Active Nodes -->
 		<div class="flex items-center gap-2">
 			<Network class="h-4 w-4 text-muted-foreground" />
 			<div class="text-sm">
@@ -98,7 +105,6 @@
 			</div>
 		</div>
 
-		<!-- Connections -->
 		<div class="flex items-center gap-2">
 			<Link class="h-4 w-4 text-muted-foreground" />
 			<div class="text-sm">
@@ -107,22 +113,18 @@
 			</div>
 		</div>
 
-		<!-- Separator -->
 		<div class="h-6 w-px bg-border"></div>
 
-		<!-- Total Traffic -->
 		<div class="text-sm">
 			<span class="text-muted-foreground">Traffic:</span>
 			<span class="ml-1 font-semibold text-primary">{formatBytes($networkStats.totalBytes)}</span>
 		</div>
 
-		<!-- Avg per Node -->
 		<div class="text-sm">
 			<span class="text-muted-foreground">Avg/Node:</span>
 			<span class="ml-1 font-semibold">{formatBytes(avgTrafficPerNode)}</span>
 		</div>
 
-		<!-- Peak Node -->
 		{#if peakNode}
 			<div class="text-sm" title="{peakNode.displayName} ({peakNode.ip}) - {formatBytes(peakNode.totalBytes)}">
 				<span class="text-muted-foreground">Peak:</span>
@@ -130,14 +132,24 @@
 				<span class="ml-1 text-xs text-muted-foreground">({formatBytes(peakNode.totalBytes)})</span>
 			</div>
 		{/if}
+	</div>
 
+	<!-- Compact stats for tablet (md only) -->
+	<div class="hidden items-center gap-3 md:flex lg:hidden">
+		<div class="text-xs">
+			<span class="font-semibold">{$networkStats.totalNodes}</span>
+			<span class="text-muted-foreground"> nodes</span>
+		</div>
+		<div class="text-xs">
+			<span class="font-semibold text-primary">{formatBytes($networkStats.totalBytes)}</span>
+		</div>
 	</div>
 
 	<!-- Right section: Actions -->
-	<div class="flex items-center gap-2">
+	<div class="flex items-center gap-1 sm:gap-2">
 		<button
 			onclick={handleRefresh}
-			class="flex items-center gap-2 rounded-md px-3 py-1.5 hover:bg-secondary"
+			class="flex items-center gap-2 rounded-md p-2.5 hover:bg-secondary sm:px-3 sm:py-1.5"
 			disabled={isRefreshing}
 		>
 			<RefreshCw class="h-4 w-4 {isRefreshing ? 'animate-spin' : ''}" />
@@ -146,7 +158,7 @@
 
 		<button
 			onclick={cycleTheme}
-			class="flex items-center gap-2 rounded-md p-2 hover:bg-secondary"
+			class="flex items-center gap-2 rounded-md p-2.5 hover:bg-secondary sm:p-2"
 			title="Theme: {getThemeLabel($themeStore)} (click to cycle)"
 		>
 			<ThemeIcon class="h-5 w-5" />
@@ -154,7 +166,7 @@
 
 		<button
 			onclick={() => uiStore.toggleLogViewer()}
-			class="rounded-md p-2 hover:bg-secondary"
+			class="rounded-md p-2.5 hover:bg-secondary sm:p-2"
 			title="Toggle log viewer"
 		>
 			<ScrollText class="h-5 w-5" />

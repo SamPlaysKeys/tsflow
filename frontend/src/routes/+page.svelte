@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { Loader2, AlertCircle, RefreshCw } from 'lucide-svelte';
+	import { Loader2, AlertCircle, RefreshCw, X } from 'lucide-svelte';
 	import NetworkGraph from '$lib/components/graph/NetworkGraph.svelte';
 	import FilterPanel from '$lib/components/filters/FilterPanel.svelte';
 	import LogViewer from '$lib/components/logs/LogViewer.svelte';
@@ -18,11 +18,12 @@
 	let logViewerHeight = $state(300);
 	let isResizing = $state(false);
 
-	function handleMouseDown() {
+	function handlePointerDown(e: PointerEvent) {
 		isResizing = true;
+		(e.target as HTMLElement).setPointerCapture(e.pointerId);
 	}
 
-	function handleMouseMove(e: MouseEvent) {
+	function handlePointerMove(e: PointerEvent) {
 		if (!isResizing) return;
 		const container = document.getElementById('main-content');
 		if (container) {
@@ -31,22 +32,44 @@
 		}
 	}
 
-	function handleMouseUp() {
+	function handlePointerUp() {
 		isResizing = false;
 	}
 </script>
 
-<svelte:window on:mousemove={handleMouseMove} on:mouseup={handleMouseUp} />
+<svelte:window on:pointermove={handlePointerMove} on:pointerup={handlePointerUp} />
 
 <div class="flex h-screen flex-col bg-background">
-	<!-- Top Bar with Network Stats -->
+	<!-- Top Bar -->
 	<Header />
 
 	<!-- Main Content Area -->
-	<div class="flex flex-1 overflow-hidden">
-		<!-- Filter Sidebar -->
+	<div class="relative flex flex-1 overflow-hidden">
+		<!-- Desktop Filter Sidebar (lg+) -->
 		{#if $uiStore.showFilterPanel}
-			<aside class="w-64 shrink-0 overflow-y-auto border-r border-border bg-card">
+			<aside class="hidden w-64 shrink-0 overflow-y-auto border-r border-border bg-card lg:block">
+				<FilterPanel />
+			</aside>
+		{/if}
+
+		<!-- Mobile Filter Drawer (< lg) -->
+		{#if $uiStore.mobileDrawerOpen}
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div
+				class="fixed inset-0 z-40 bg-black/50 lg:hidden"
+				onclick={() => uiStore.closeMobileDrawer()}
+				onkeydown={(e) => e.key === 'Escape' && uiStore.closeMobileDrawer()}
+			></div>
+			<aside class="fixed inset-y-0 left-0 z-50 flex w-72 flex-col overflow-y-auto bg-card shadow-2xl lg:hidden">
+				<div class="flex items-center justify-between border-b border-border px-4 py-3">
+					<h2 class="text-sm font-semibold">Filters</h2>
+					<button
+						onclick={() => uiStore.closeMobileDrawer()}
+						class="rounded-md p-2 hover:bg-secondary"
+					>
+						<X class="h-5 w-5" />
+					</button>
+				</div>
 				<FilterPanel />
 			</aside>
 		{/if}
@@ -61,7 +84,7 @@
 				</div>
 			<!-- Error State -->
 			{:else if $uiStore.error}
-				<div class="flex flex-1 flex-col items-center justify-center gap-4">
+				<div class="flex flex-1 flex-col items-center justify-center gap-4 p-4">
 					<AlertCircle class="h-8 w-8 text-destructive" />
 					<div class="text-center">
 						<p class="font-medium text-destructive">Failed to load network data</p>
@@ -84,19 +107,18 @@
 
 			<!-- Bottom Panel: Bandwidth Chart + Port Details + Log Viewer -->
 			{#if $uiStore.showLogViewer}
-				<!-- Bandwidth Chart -->
 				<BandwidthChart />
-
-				<!-- Port Details (shows when node selected) -->
 				<PortDetails />
 
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<!-- Resize Handle -->
+				<!-- Resize Handle - taller touch target on mobile -->
 				<div
-					class="h-1 cursor-row-resize bg-border hover:bg-primary"
-					onmousedown={handleMouseDown}
+					class="flex h-3 cursor-row-resize items-center justify-center bg-border/50 hover:bg-primary/50 sm:h-1 sm:bg-border sm:hover:bg-primary"
+					onpointerdown={handlePointerDown}
 					aria-hidden="true"
-				></div>
+				>
+					<div class="h-0.5 w-8 rounded-full bg-muted-foreground/50 sm:hidden"></div>
+				</div>
 				<div class="overflow-hidden border-t border-border bg-card" style="height: {logViewerHeight}px">
 					<LogViewer />
 				</div>

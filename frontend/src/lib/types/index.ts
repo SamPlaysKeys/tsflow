@@ -103,6 +103,7 @@ export interface TimeRange {
 export interface UIState {
 	showFilterPanel: boolean;
 	showLogViewer: boolean;
+	mobileDrawerOpen: boolean;
 	selectedNodeId: string | null;
 	selectedEdgeId: string | null;
 	isLoading: boolean;

@@ -11,9 +11,9 @@
 	} = $props();
 </script>
 
-<div class="rounded-lg border border-border bg-card p-4">
+<div class="rounded-lg border border-border bg-card p-3 sm:p-4">
 	<div class="flex items-center justify-between">
-		<div class="flex items-center gap-2 text-sm text-muted-foreground">
+		<div class="flex items-center gap-1.5 text-xs text-muted-foreground sm:gap-2 sm:text-sm">
 			{#if icon}
 				{@render icon()}
 			{/if}
@@ -35,7 +35,7 @@
 			</div>
 		{/if}
 	</div>
-	<div class="mt-1 text-2xl font-bold">{value}</div>
+	<div class="mt-1 text-lg font-bold sm:text-2xl">{value}</div>
 	{#if subtitle}
 		<div class="mt-0.5 text-xs text-muted-foreground/70">{subtitle}</div>
 	{/if}

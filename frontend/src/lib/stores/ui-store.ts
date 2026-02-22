@@ -5,6 +5,7 @@ import { filteredEdges } from './network-store';
 const defaultUIState: UIState = {
 	showFilterPanel: true,
 	showLogViewer: true,
+	mobileDrawerOpen: false,
 	selectedNodeId: null,
 	selectedEdgeId: null,
 	isLoading: false,
@@ -18,6 +19,9 @@ function createUIStore() {
 		subscribe,
 		toggleFilterPanel: () => update((s) => ({ ...s, showFilterPanel: !s.showFilterPanel })),
 		toggleLogViewer: () => update((s) => ({ ...s, showLogViewer: !s.showLogViewer })),
+		openMobileDrawer: () => update((s) => ({ ...s, mobileDrawerOpen: true })),
+		closeMobileDrawer: () => update((s) => ({ ...s, mobileDrawerOpen: false })),
+		toggleMobileDrawer: () => update((s) => ({ ...s, mobileDrawerOpen: !s.mobileDrawerOpen })),
 		selectNode: (nodeId: string | null) =>
 			update((s) => ({ ...s, selectedNodeId: nodeId, selectedEdgeId: null })),
 		selectEdge: (edgeId: string | null) =>

@@ -3,43 +3,24 @@
 	import { formatBytes, extractIP, extractPort, getProtocolName } from '$lib/utils';
 	import type { NetworkLog } from '$lib/types';
 
-	// Well-known port names
 	const PORT_NAMES: Record<number, string> = {
-		20: 'FTP-DATA',
-		21: 'FTP',
-		22: 'SSH',
-		23: 'Telnet',
-		25: 'SMTP',
-		53: 'DNS',
-		80: 'HTTP',
-		110: 'POP3',
-		143: 'IMAP',
-		443: 'HTTPS',
-		465: 'SMTPS',
-		587: 'SMTP',
-		993: 'IMAPS',
-		995: 'POP3S',
-		3306: 'MySQL',
-		5432: 'PostgreSQL',
-		6379: 'Redis',
-		8080: 'HTTP-Alt',
-		8443: 'HTTPS-Alt',
-		9090: 'Prometheus',
-		27017: 'MongoDB'
+		20: 'FTP-DATA', 21: 'FTP', 22: 'SSH', 23: 'Telnet', 25: 'SMTP',
+		53: 'DNS', 80: 'HTTP', 110: 'POP3', 143: 'IMAP', 443: 'HTTPS',
+		465: 'SMTPS', 587: 'SMTP', 993: 'IMAPS', 995: 'POP3S',
+		3306: 'MySQL', 5432: 'PostgreSQL', 6379: 'Redis',
+		8080: 'HTTP-Alt', 8443: 'HTTPS-Alt', 9090: 'Prometheus', 27017: 'MongoDB'
 	};
 
 	function getPortName(port: number): string {
 		return PORT_NAMES[port] || (port > 0 ? `Port ${port}` : 'Unknown');
 	}
 
-	// Get selected node info
 	const selectedNode = $derived.by(() => {
 		const selectedId = $uiStore.selectedNodeId;
 		if (!selectedId) return null;
 		return $filteredNodes.find((n) => n.id === selectedId) || null;
 	});
 
-	// Aggregate port usage from logs
 	interface PortStat {
 		port: number;
 		name: string;
@@ -49,7 +30,6 @@
 		connections: number;
 	}
 
-	// Store the full port count separately from the display-limited list
 	const portData = $derived.by(() => {
 		if (!selectedNode) return { stats: [], totalCount: 0 };
 
@@ -68,10 +48,7 @@
 				const dstPort = extractPort(t.dst) || 0;
 				const proto = getProtocolName(t.proto || 0);
 
-				// Check if this node is involved
 				if (nodeIPs.has(srcIP) || nodeIPs.has(dstIP)) {
-					// Always use destination port - it represents the service being accessed
-					// Source ports are typically ephemeral and not meaningful
 					if (dstPort === 0) return;
 
 					const key = `${dstPort}-${proto}`;
@@ -99,15 +76,14 @@
 			.sort((a, b) => (b.txBytes + b.rxBytes) - (a.txBytes + a.rxBytes));
 
 		return {
-			stats: allPorts.slice(0, 20), // Top 20 ports for display
-			totalCount: allPorts.length    // True total count
+			stats: allPorts.slice(0, 20),
+			totalCount: allPorts.length
 		};
 	});
 
 	const portStats = $derived(portData.stats);
 	const totalPortCount = $derived(portData.totalCount);
 
-	// Calculate total traffic from all ports (not just displayed top 20)
 	const totalTraffic = $derived.by(() => {
 		if (!selectedNode) return { tx: 0, rx: 0, total: 0 };
 
@@ -125,7 +101,6 @@
 				const srcIP = extractIP(t.src);
 				const dstIP = extractIP(t.dst);
 
-				// Check if this node is involved
 				if (nodeIPs.has(srcIP) || nodeIPs.has(dstIP)) {
 					tx += t.txBytes || 0;
 					rx += t.rxBytes || 0;
@@ -139,16 +114,18 @@
 
 {#if selectedNode && portStats.length > 0}
 	<div class="border-t border-border bg-card">
-		<div class="border-b border-border p-3">
+		<div class="border-b border-border p-2 sm:p-3">
 			<h2 class="text-sm font-semibold">Port Usage</h2>
 			<p class="text-xs text-muted-foreground">
-				{selectedNode.displayName} - {totalPortCount} active ports{totalPortCount > 20 ? ' (showing top 20)' : ''}
+				<span class="hidden sm:inline">{selectedNode.displayName} - </span>{totalPortCount} active ports{totalPortCount > 20 ? ' (top 20)' : ''}
 				<span class="ml-2">
 					TX: {formatBytes(totalTraffic.tx)} | RX: {formatBytes(totalTraffic.rx)}
 				</span>
 			</p>
 		</div>
-		<div class="max-h-48 overflow-auto">
+
+		<!-- Desktop/Tablet table -->
+		<div class="hidden max-h-48 overflow-auto sm:block">
 			<table class="w-full text-xs">
 				<thead class="sticky top-0 bg-card">
 					<tr class="border-b border-border text-left">
@@ -175,6 +152,27 @@
 					{/each}
 				</tbody>
 			</table>
+		</div>
+
+		<!-- Mobile card view -->
+		<div class="max-h-48 divide-y divide-border/50 overflow-auto sm:hidden">
+			{#each portStats as stat}
+				<div class="px-3 py-2">
+					<div class="flex items-center justify-between">
+						<div class="flex items-center gap-2">
+							<span class="font-mono text-xs text-primary">{stat.port}</span>
+							<span class="text-xs">{stat.name}</span>
+							<span class="text-[10px] uppercase text-muted-foreground">{stat.protocol}</span>
+						</div>
+						<span class="text-[10px] text-muted-foreground">{stat.connections} conn</span>
+					</div>
+					<div class="mt-0.5 flex gap-3 text-[10px]">
+						<span class="text-blue-400">TX {formatBytes(stat.txBytes)}</span>
+						<span class="text-emerald-400">RX {formatBytes(stat.rxBytes)}</span>
+						<span class="font-medium">{formatBytes(stat.txBytes + stat.rxBytes)}</span>
+					</div>
+				</div>
+			{/each}
 		</div>
 	</div>
 {/if}

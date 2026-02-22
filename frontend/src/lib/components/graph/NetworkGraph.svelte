@@ -376,6 +376,8 @@
 				<Background />
 				<Controls />
 				<MiniMap
+					width={120}
+					height={80}
 					nodeColor={(node) => {
 						const data = node.data as any;
 						const colors = getNodeColors();

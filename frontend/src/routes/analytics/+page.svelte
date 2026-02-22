@@ -27,7 +27,6 @@
 		stopStatsRefresh();
 	});
 
-	// Sorting state for tables
 	type TalkerField = 'totalBytes' | 'txBytes' | 'rxBytes';
 	type PairField = 'totalBytes' | 'flowCount';
 	let talkerSort: TalkerField = $state('totalBytes');
@@ -130,7 +129,7 @@
 <div class="flex h-screen flex-col bg-background">
 	<Header />
 
-	<main class="flex-1 overflow-y-auto p-6">
+	<main class="flex-1 overflow-y-auto p-3 sm:p-6">
 		{#if $statsLoading && !$statsSummary}
 			<div class="flex h-full items-center justify-center">
 				<Loader2 class="h-8 w-8 animate-spin text-primary" />
@@ -141,7 +140,7 @@
 			</div>
 		{:else}
 			<!-- Overview Cards -->
-			<div class="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+			<div class="mb-4 grid grid-cols-2 gap-2 sm:mb-6 sm:gap-4 lg:grid-cols-4">
 				<StatCard label="Total Traffic" value={formatBytes(totalBytes)} subtitle={timeWindowLabel}>
 					{#snippet icon()}<Activity class="h-4 w-4" />{/snippet}
 				</StatCard>
@@ -155,28 +154,28 @@
 				<StatCard
 					label="Unique Pairs"
 					value={($statsSummary?.uniquePairs ?? 0).toLocaleString()}
-					subtitle="Communicating device pairs"
+					subtitle="Device pairs"
 				>
 					{#snippet icon()}<Link class="h-4 w-4" />{/snippet}
 				</StatCard>
 				<StatCard
 					label="Active Devices"
 					value={$topTalkers.length.toString()}
-					subtitle="With traffic in window"
+					subtitle="With traffic"
 				>
 					{#snippet icon()}<Network class="h-4 w-4" />{/snippet}
 				</StatCard>
 			</div>
 
 			<!-- Distribution Charts -->
-			<div class="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-				<div class="rounded-lg border border-border bg-card p-4">
+			<div class="mb-4 grid grid-cols-1 gap-3 sm:mb-6 sm:gap-6 lg:grid-cols-2">
+				<div class="rounded-lg border border-border bg-card p-3 sm:p-4">
 					<h3 class="mb-3 text-sm font-medium text-muted-foreground">
 						Protocol Distribution
 					</h3>
 					<DonutChart segments={protoSegments} />
 				</div>
-				<div class="rounded-lg border border-border bg-card p-4">
+				<div class="rounded-lg border border-border bg-card p-3 sm:p-4">
 					<h3 class="mb-3 text-sm font-medium text-muted-foreground">
 						Traffic Type Distribution
 					</h3>
@@ -185,11 +184,13 @@
 			</div>
 
 			<!-- Rankings -->
-			<div class="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+			<div class="mb-4 grid grid-cols-1 gap-3 sm:mb-6 sm:gap-6 lg:grid-cols-2">
 				<!-- Top Talkers -->
-				<div class="rounded-lg border border-border bg-card p-4">
+				<div class="rounded-lg border border-border bg-card p-3 sm:p-4">
 					<h3 class="mb-3 text-sm font-medium text-muted-foreground">Top Talkers</h3>
-					<div class="overflow-x-auto">
+
+					<!-- Desktop/Tablet table -->
+					<div class="hidden overflow-x-auto sm:block">
 						<table class="w-full text-sm">
 							<thead>
 								<tr class="border-b border-border text-left text-muted-foreground">
@@ -242,12 +243,39 @@
 							</tbody>
 						</table>
 					</div>
+
+					<!-- Mobile card view -->
+					<div class="divide-y divide-border/50 sm:hidden">
+						{#each sortedTalkers as talker, i}
+							<div class="py-2">
+								<div class="flex items-center justify-between">
+									<div class="flex items-center gap-2">
+										<span class="text-xs text-muted-foreground">{i + 1}.</span>
+										{#if talker.displayName}
+											<span class="text-sm font-medium">{talker.displayName}</span>
+										{:else}
+											<span class="font-mono text-xs text-muted-foreground">
+												{nodeLabel(talker.nodeId)}
+											</span>
+										{/if}
+									</div>
+									<span class="text-sm font-medium tabular-nums">{formatBytes(talker.totalBytes)}</span>
+								</div>
+								<div class="mt-0.5 flex gap-3 pl-5 text-xs text-muted-foreground">
+									<span class="tabular-nums">TX {formatBytes(talker.txBytes)}</span>
+									<span class="tabular-nums">RX {formatBytes(talker.rxBytes)}</span>
+								</div>
+							</div>
+						{/each}
+					</div>
 				</div>
 
 				<!-- Top Pairs -->
-				<div class="rounded-lg border border-border bg-card p-4">
+				<div class="rounded-lg border border-border bg-card p-3 sm:p-4">
 					<h3 class="mb-3 text-sm font-medium text-muted-foreground">Top Pairs</h3>
-					<div class="overflow-x-auto">
+
+					<!-- Desktop/Tablet table -->
+					<div class="hidden overflow-x-auto sm:block">
 						<table class="w-full text-sm">
 							<thead>
 								<tr class="border-b border-border text-left text-muted-foreground">
@@ -307,11 +335,43 @@
 							</tbody>
 						</table>
 					</div>
+
+					<!-- Mobile card view -->
+					<div class="divide-y divide-border/50 sm:hidden">
+						{#each sortedPairs as pair, i}
+							<div class="py-2">
+								<div class="flex items-center justify-between">
+									<span class="text-xs text-muted-foreground">{i + 1}.</span>
+									<span class="text-sm font-medium tabular-nums">{formatBytes(pair.totalBytes)}</span>
+								</div>
+								<div class="mt-0.5 flex items-center gap-1 text-xs">
+									<span class="truncate">
+										{#if pair.srcDisplayName}
+											<span class="font-medium">{pair.srcDisplayName}</span>
+										{:else}
+											<span class="font-mono text-[10px] text-muted-foreground">{nodeLabel(pair.srcNodeId)}</span>
+										{/if}
+									</span>
+									<span class="shrink-0 text-muted-foreground">&rarr;</span>
+									<span class="truncate">
+										{#if pair.dstDisplayName}
+											<span class="font-medium">{pair.dstDisplayName}</span>
+										{:else}
+											<span class="font-mono text-[10px] text-muted-foreground">{nodeLabel(pair.dstNodeId)}</span>
+										{/if}
+									</span>
+								</div>
+								<div class="mt-0.5 text-[10px] text-muted-foreground">
+									{pair.flowCount.toLocaleString()} flows
+								</div>
+							</div>
+						{/each}
+					</div>
 				</div>
 			</div>
 
 			<!-- Top Ports -->
-			<div class="rounded-lg border border-border bg-card p-4">
+			<div class="rounded-lg border border-border bg-card p-3 sm:p-4">
 				<h3 class="mb-3 text-sm font-medium text-muted-foreground">Top Ports</h3>
 				{#if portBars.length > 0}
 					<BarChart bars={portBars} height={400} />
