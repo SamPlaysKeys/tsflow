@@ -2,9 +2,12 @@ import { writable, derived, get } from 'svelte/store';
 import type { Device, NetworkLog, NetworkNode, NetworkLink } from '$lib/types';
 import { tailscaleService, type AggregatedFlow } from '$lib/services';
 import { processNetworkLogs } from '$lib/utils/network-processor';
-import { filterStore, timeRangeStore, TIME_RANGES } from './filter-store';
+import { filterStore, debouncedFilterStore, timeRangeStore, TIME_RANGES } from './filter-store';
 import { uiStore } from './ui-store';
 import { dataSourceStore } from './data-source-store';
+
+// Last updated timestamp
+export const lastUpdated = writable<Date | null>(null);
 
 // Raw data stores
 export const devices = writable<Device[]>([]);
@@ -22,13 +25,12 @@ export const processedNetwork = derived(
 );
 
 // First, filter edges by traffic type to determine which nodes should be visible
-const trafficFilteredEdges = derived([processedNetwork, filterStore], ([$network, $filters]) => {
+// Uses debouncedFilterStore to avoid re-running expensive graph filtering on every keystroke
+const trafficFilteredEdges = derived([processedNetwork, debouncedFilterStore], ([$network, $filters]) => {
 	return $network.links.filter((link) => {
-		// Traffic type filter - if types are selected, only show those types
-		if ($filters.trafficTypes.length > 0) {
-			if (!$filters.trafficTypes.includes(link.trafficType)) return false;
-		}
-		return true;
+		// Traffic type filter — only show selected types. Empty = nothing shown.
+		if ($filters.trafficTypes.length === 0) return false;
+		return $filters.trafficTypes.includes(link.trafficType);
 	});
 });
 
@@ -70,7 +72,7 @@ function nodeMatchesSearch(node: NetworkNode, query: string): boolean {
 
 // Primary matched nodes (nodes directly matching the search query)
 export const primaryMatchedNodes = derived(
-	[processedNetwork, filterStore, nodesWithTrafficConnections],
+	[processedNetwork, debouncedFilterStore, nodesWithTrafficConnections],
 	([$network, $filters, $connectedNodeIds]) => {
 		return $network.nodes.filter((node) => {
 			if (!$connectedNodeIds.has(node.id)) return false;
@@ -105,7 +107,7 @@ const connectedToMatchedNodes = derived(
 
 // Filtered nodes: primary matches + their connected nodes
 export const filteredNodes = derived(
-	[processedNetwork, primaryMatchedNodes, connectedToMatchedNodes, nodesWithTrafficConnections, filterStore],
+	[processedNetwork, primaryMatchedNodes, connectedToMatchedNodes, nodesWithTrafficConnections, debouncedFilterStore],
 	([$network, $primaryNodes, $connectedIds, $connectedNodeIds, $filters]) => {
 		const primaryIds = new Set($primaryNodes.map((n) => n.id));
 
@@ -124,7 +126,7 @@ export const filteredNodes = derived(
 
 // Filtered edges - show edges where at least one endpoint is a primary match
 export const filteredEdges = derived(
-	[trafficFilteredEdges, filteredNodes, primaryMatchedNodes, filterStore],
+	[trafficFilteredEdges, filteredNodes, primaryMatchedNodes, debouncedFilterStore],
 	([$trafficEdges, $nodes, $primaryNodes, $filters]) => {
 		const nodeIds = new Set($nodes.map((n) => n.id));
 		const primaryIds = new Set($primaryNodes.map((n) => n.id));
@@ -177,8 +179,67 @@ export const networkStore = {
 	).subscribe
 };
 
+// Retry state
+const MAX_RETRIES = 3;
+export const retryCount = writable(0);
+export const retryingIn = writable<number | null>(null); // seconds until next retry
+let retryTimeout: ReturnType<typeof setTimeout> | null = null;
+let retryTickInterval: ReturnType<typeof setInterval> | null = null;
+
+function clearRetryState() {
+	if (retryTimeout) {
+		clearTimeout(retryTimeout);
+		retryTimeout = null;
+	}
+	if (retryTickInterval) {
+		clearInterval(retryTickInterval);
+		retryTickInterval = null;
+	}
+	retryCount.set(0);
+	retryingIn.set(null);
+}
+
+function scheduleRetry(attempt: number) {
+	// Clear any existing tick interval from a previous retry
+	if (retryTickInterval) {
+		clearInterval(retryTickInterval);
+	}
+
+	const delaySec = Math.pow(2, attempt - 1); // 1s, 2s, 4s
+	retryingIn.set(delaySec);
+
+	// Countdown ticker
+	let remaining = delaySec;
+	retryTickInterval = setInterval(() => {
+		remaining--;
+		if (remaining > 0) {
+			retryingIn.set(remaining);
+		} else {
+			if (retryTickInterval) {
+				clearInterval(retryTickInterval);
+				retryTickInterval = null;
+			}
+		}
+	}, 1000);
+
+	retryTimeout = setTimeout(() => {
+		retryingIn.set(null);
+		loadNetworkData(attempt);
+	}, delaySec * 1000);
+}
+
+// AbortController for in-flight requests
+let activeController: AbortController | null = null;
+
 // Load network data
-export async function loadNetworkData() {
+export async function loadNetworkData(currentAttempt = 0) {
+	// Cancel any in-flight request
+	if (activeController) {
+		activeController.abort();
+	}
+	activeController = new AbortController();
+	const signal = activeController.signal;
+
 	uiStore.setLoading(true);
 	uiStore.setError(null);
 
@@ -187,10 +248,20 @@ export async function loadNetworkData() {
 		const dataSource = get(dataSourceStore);
 		let start: Date, end: Date;
 
-		if (dataSource.mode === 'historical' && dataSource.selectedStart && dataSource.selectedEnd) {
-			// Use the selected time range for historical mode
+		if (dataSource.mode === 'historical') {
+			if (!dataSource.selectedStart || !dataSource.selectedEnd) {
+				// Range not set yet (e.g. during mode switch) - skip load
+				uiStore.setLoading(false);
+				return;
+			}
 			start = dataSource.selectedStart;
 			end = dataSource.selectedEnd;
+			// Guard against zero/invalid dates from empty DB
+			if (start.getFullYear() < 1970 || end.getFullYear() < 1970 || start >= end) {
+				uiStore.setLoading(false);
+				uiStore.setError('No stored data available yet. Switch to Live mode.');
+				return;
+			}
 		} else {
 			// Live mode - use time range store
 			const timeRange = get(timeRangeStore);
@@ -208,189 +279,145 @@ export async function loadNetworkData() {
 
 		// Fetch devices and services (always from live API)
 		const [devicesData, servicesData] = await Promise.all([
-			tailscaleService.getDevices(),
-			tailscaleService.getServicesRecords()
+			tailscaleService.getDevices(signal),
+			tailscaleService.getServicesRecords(signal)
 		]);
 
 		// Fetch logs based on mode
 		let graphLogs;
 		let viewerLogs;
 		if (dataSource.mode === 'historical') {
-			// Fetch aggregated flows for graph (fast, node-level)
-			const aggregatedData = await tailscaleService.getAggregatedFlows(start, end);
+			// Fetch all traffic types — client-side filtering (trafficFilteredEdges)
+			// handles showing/hiding by type. Server-side filtering would cause
+			// missing data when the user enables a type that wasn't initially fetched.
+			const aggregatedData = await tailscaleService.getAggregatedFlows(start, end, undefined, signal);
 			graphLogs = convertAggregatedFlowsToNetworkLogs(aggregatedData.flows || [], start, end);
-			// Fetch raw logs for LogViewer (full detail with ports)
-			const storedLogs = await tailscaleService.getStoredFlowLogs(start, end);
-			viewerLogs = convertStoredLogsToNetworkLogs(storedLogs.logs || []);
+			// Use aggregated flows for LogViewer too (raw flow_logs_current is empty for old data)
+			viewerLogs = graphLogs;
 		} else {
 			// Fetch live from Tailscale API - same data for both
-			const logsData = await tailscaleService.getNetworkLogs(start, end);
+			const logsData = await tailscaleService.getNetworkLogs(start, end, signal);
 			graphLogs = logsData.logs || [];
 			viewerLogs = graphLogs;
 		}
+
+		if (signal.aborted) return;
 
 		devices.set(devicesData);
 		networkLogs.set(graphLogs); // For graph visualization
 		rawLogs.set(viewerLogs); // For LogViewer with full detail
 		services.set(servicesData.services || {});
 		records.set(servicesData.records || {});
+		lastUpdated.set(new Date());
+		clearRetryState();
 	} catch (err) {
+		if (signal.aborted) return; // Silently ignore cancelled requests
 		console.error('Failed to load network data:', err);
 		uiStore.setError(err instanceof Error ? err.message : 'Failed to load network data');
+
+		const nextAttempt = currentAttempt + 1;
+		retryCount.set(nextAttempt);
+		if (nextAttempt < MAX_RETRIES) {
+			scheduleRetry(nextAttempt);
+		}
 	} finally {
-		uiStore.setLoading(false);
+		if (!signal.aborted) {
+			uiStore.setLoading(false);
+		}
 	}
 }
 
-// Convert stored flow logs to NetworkLog format for processing
-function convertStoredLogsToNetworkLogs(storedLogs: any[]): NetworkLog[] {
-	// Group logs by nodeId and time period
-	const grouped = new Map<string, any[]>();
-
-	for (const log of storedLogs) {
-		const key = `${log.nodeId}-${log.periodStart}-${log.periodEnd}`;
-		if (!grouped.has(key)) {
-			grouped.set(key, []);
-		}
-		const group = grouped.get(key);
-		if (group) {
-			group.push(log);
-		}
-	}
-
-	// Convert to NetworkLog format
-	const networkLogs: NetworkLog[] = [];
-
-	// Helper to format IP:port correctly for IPv4 and IPv6
-	const formatAddress = (ip: string, port: number): string => {
-		if (ip.includes(':')) {
-			// IPv6: use [ip]:port format
-			return `[${ip}]:${port}`;
-		}
-		// IPv4: use ip:port format
-		return `${ip}:${port}`;
-	};
-
-	for (const [, logs] of grouped) {
-		if (logs.length === 0) continue;
-
-		const first = logs[0];
-		const networkLog: NetworkLog = {
-			logged: first.loggedAt,
-			nodeId: first.nodeId,
-			start: first.periodStart,
-			end: first.periodEnd,
-			virtualTraffic: [],
-			subnetTraffic: [],
-			physicalTraffic: []
-		};
-
-		for (const log of logs) {
-			const traffic = {
-				proto: log.protocol,
-				src: formatAddress(log.srcIp, log.srcPort),
-				dst: formatAddress(log.dstIp, log.dstPort),
-				txBytes: log.txBytes,
-				rxBytes: log.rxBytes,
-				txPkts: log.txPkts,
-				rxPkts: log.rxPkts
-			};
-
-			switch (log.trafficType) {
-				case 'virtual':
-					networkLog.virtualTraffic.push(traffic);
-					break;
-				case 'subnet':
-					networkLog.subnetTraffic.push(traffic);
-					break;
-				case 'physical':
-					networkLog.physicalTraffic.push(traffic);
-					break;
-				default:
-					// Unknown traffic type - default to virtual to avoid data loss
-					console.warn(`Unknown traffic type "${log.trafficType}" in stored log, treating as virtual`);
-					networkLog.virtualTraffic.push(traffic);
-					break;
-			}
-		}
-
-		networkLogs.push(networkLog);
-	}
-
-	return networkLogs;
+// Manual retry with reset backoff
+export function retryLoadNetworkData() {
+	clearRetryState();
+	loadNetworkData(0);
 }
 
-// Convert pre-aggregated node-pair flows to NetworkLog format for the graph
-// The backend now returns srcNodeId/dstNodeId (device IDs or IPs for external nodes)
+// Convert pre-aggregated node-pair flows to NetworkLog format for the graph.
+// Emits two entries per flow (forward + reverse with TX-only) so the network
+// processor's TX-only dedup logic works consistently for both live and historical data.
 function convertAggregatedFlowsToNetworkLogs(flows: AggregatedFlow[], rangeStart: Date, rangeEnd: Date): NetworkLog[] {
-	// Group by srcNodeId to create NetworkLog entries
-	const grouped = new Map<string, AggregatedFlow[]>();
-
-	for (const flow of flows) {
-		// Use srcNodeId as the primary grouping key
-		const key = flow.srcNodeId;
-		if (!grouped.has(key)) {
-			grouped.set(key, []);
-		}
-		const group = grouped.get(key);
-		if (group) {
-			group.push(flow);
-		}
-	}
-
-	const networkLogs: NetworkLog[] = [];
+	// Build two NetworkLogs per flow: one for the forward direction (src→dst)
+	// and one for the reverse (dst→src). Each only carries txBytes.
+	const logsByNode = new Map<string, NetworkLog>();
 	const startISO = rangeStart.toISOString();
 	const endISO = rangeEnd.toISOString();
 
-	for (const [nodeId, nodeFlows] of grouped) {
-		if (nodeFlows.length === 0) continue;
+	function getOrCreateLog(nodeId: string): NetworkLog {
+		let log = logsByNode.get(nodeId);
+		if (!log) {
+			log = {
+				logged: endISO,
+				nodeId,
+				start: startISO,
+				end: endISO,
+				virtualTraffic: [],
+				exitTraffic: [],
+				subnetTraffic: [],
+				physicalTraffic: []
+			};
+			logsByNode.set(nodeId, log);
+		}
+		return log;
+	}
 
-		const networkLog: NetworkLog = {
-			logged: endISO,
-			nodeId: nodeId,
-			start: startISO,
-			end: endISO,
-			virtualTraffic: [],
-			subnetTraffic: [],
-			physicalTraffic: []
-		};
+	function pushTraffic(log: NetworkLog, trafficType: string, entry: any) {
+		switch (trafficType) {
+			case 'virtual':
+				log.virtualTraffic.push(entry);
+				break;
+			case 'exit':
+				log.exitTraffic!.push(entry);
+				break;
+			case 'subnet':
+				log.subnetTraffic.push(entry);
+				break;
+			case 'physical':
+				log.physicalTraffic.push(entry);
+				break;
+			default:
+				log.virtualTraffic.push(entry);
+				break;
+		}
+	}
 
-		for (const flow of nodeFlows) {
-			// The src/dst are now node IDs (device IDs or IPs)
-			// Format them as addresses for backwards compatibility with graph processing
-			const traffic = {
-				proto: flow.protocol || 0,
+	for (const flow of flows) {
+		const proto = flow.protocol || 0;
+
+		// Forward direction: src sent txBytes to dst
+		if (flow.totalTxBytes > 0) {
+			const fwdLog = getOrCreateLog(flow.srcNodeId);
+			pushTraffic(fwdLog, flow.trafficType, {
+				proto,
 				src: flow.srcNodeId,
 				dst: flow.dstNodeId,
 				txBytes: flow.totalTxBytes,
-				rxBytes: flow.totalRxBytes,
+				rxBytes: 0,
 				txPkts: flow.totalTxPkts || 0,
-				rxPkts: flow.totalRxPkts || 0
-			};
-
-			switch (flow.trafficType) {
-				case 'virtual':
-					networkLog.virtualTraffic.push(traffic);
-					break;
-				case 'subnet':
-					networkLog.subnetTraffic.push(traffic);
-					break;
-				case 'physical':
-					networkLog.physicalTraffic.push(traffic);
-					break;
-				default:
-					// Unknown traffic type - default to virtual to avoid data loss
-					console.warn(`Unknown traffic type "${flow.trafficType}" for flow ${flow.srcNodeId} -> ${flow.dstNodeId}, treating as virtual`);
-					networkLog.virtualTraffic.push(traffic);
-					break;
-			}
+				rxPkts: 0
+			});
 		}
 
-		networkLogs.push(networkLog);
+		// Reverse direction: dst sent rxBytes back to src
+		if (flow.totalRxBytes > 0) {
+			const revLog = getOrCreateLog(flow.dstNodeId);
+			pushTraffic(revLog, flow.trafficType, {
+				proto,
+				src: flow.dstNodeId,
+				dst: flow.srcNodeId,
+				txBytes: flow.totalRxBytes,
+				rxBytes: 0,
+				txPkts: flow.totalRxPkts || 0,
+				rxPkts: 0
+			});
+		}
 	}
 
-	return networkLogs;
+	return Array.from(logsByNode.values());
 }
+
+// Auto-refresh state
+export const isAutoRefreshing = writable(false);
 
 // Refresh data periodically
 let refreshInterval: ReturnType<typeof setInterval> | null = null;
@@ -399,12 +426,17 @@ let refreshInterval: ReturnType<typeof setInterval> | null = null;
 if (typeof window !== 'undefined') {
 	window.addEventListener('beforeunload', () => {
 		stopAutoRefresh();
+		clearRetryState();
 	});
 }
 
 export function startAutoRefresh(intervalMs = 300000) {
 	stopAutoRefresh();
-	refreshInterval = setInterval(loadNetworkData, intervalMs);
+	// Don't auto-refresh in historical mode - data is static
+	const ds = get(dataSourceStore);
+	if (ds.mode === 'historical') return;
+	refreshInterval = setInterval(() => loadNetworkData(0), intervalMs);
+	isAutoRefreshing.set(true);
 }
 
 export function stopAutoRefresh() {
@@ -412,4 +444,5 @@ export function stopAutoRefresh() {
 		clearInterval(refreshInterval);
 		refreshInterval = null;
 	}
+	isAutoRefreshing.set(false);
 }

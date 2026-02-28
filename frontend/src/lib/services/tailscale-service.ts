@@ -50,6 +50,8 @@ export interface AggregatedFlow {
 	// Node pair aggregates (device IDs or IPs for external nodes)
 	srcNodeId: string;
 	dstNodeId: string;
+	srcDisplayName?: string;
+	dstDisplayName?: string;
 	trafficType: string;
 	totalTxBytes: number;
 	totalRxBytes: number;
@@ -119,37 +121,37 @@ export interface BandwidthResponse {
 }
 
 export const tailscaleService = {
-	async getDevices(): Promise<Device[]> {
-		const response = await api.get<DevicesResponse>('/devices');
+	async getDevices(signal?: AbortSignal): Promise<Device[]> {
+		const response = await api.get<DevicesResponse>('/devices', { signal });
 		return response.devices || [];
 	},
 
-	async getNetworkLogs(start: Date, end: Date): Promise<NetworkLogsResponse> {
+	async getNetworkLogs(start: Date, end: Date, signal?: AbortSignal): Promise<NetworkLogsResponse> {
 		const startISO = start.toISOString();
 		const endISO = end.toISOString();
-		return api.get<NetworkLogsResponse>(`/network-logs?start=${startISO}&end=${endISO}`);
+		return api.get<NetworkLogsResponse>(`/network-logs?start=${startISO}&end=${endISO}`, { signal });
 	},
 
-	async getServicesRecords(): Promise<ServicesResponse> {
-		return api.get<ServicesResponse>('/services-records');
+	async getServicesRecords(signal?: AbortSignal): Promise<ServicesResponse> {
+		return api.get<ServicesResponse>('/services-records', { signal });
 	},
 
-	// New methods for stored historical data
-	async getStoredFlowLogs(start: Date, end: Date, limit = 50000): Promise<StoredFlowLogsResponse> {
+	async getStoredFlowLogs(start: Date, end: Date, limit = 50000, signal?: AbortSignal): Promise<StoredFlowLogsResponse> {
 		const startISO = start.toISOString();
 		const endISO = end.toISOString();
 		return api.get<StoredFlowLogsResponse>(
-			`/flow-logs?start=${startISO}&end=${endISO}&limit=${limit}`
+			`/flow-logs?start=${startISO}&end=${endISO}&limit=${limit}`, { signal }
 		);
 	},
 
-	// Aggregated flows for scalable network graph rendering (no limits)
-	async getAggregatedFlows(start: Date, end: Date): Promise<AggregatedFlowsResponse> {
+	async getAggregatedFlows(start: Date, end: Date, trafficTypes?: string[], signal?: AbortSignal): Promise<AggregatedFlowsResponse> {
 		const startISO = start.toISOString();
 		const endISO = end.toISOString();
-		return api.get<AggregatedFlowsResponse>(
-			`/flow-logs/aggregated?start=${startISO}&end=${endISO}`
-		);
+		let url = `/flow-logs/aggregated?start=${startISO}&end=${endISO}`;
+		if (trafficTypes && trafficTypes.length > 0) {
+			url += `&trafficTypes=${trafficTypes.join(',')}`;
+		}
+		return api.get<AggregatedFlowsResponse>(url, { signal });
 	},
 
 	async getDataRange(): Promise<DataRange> {
@@ -160,7 +162,7 @@ export const tailscaleService = {
 		return api.get<PollerStatus>('/poller/status');
 	},
 
-	async getBandwidth(start: Date, end: Date, ipsOrNodeId?: string[] | string): Promise<BandwidthResponse> {
+	async getBandwidth(start: Date, end: Date, ipsOrNodeId?: string[] | string, signal?: AbortSignal): Promise<BandwidthResponse> {
 		const startISO = start.toISOString();
 		const endISO = end.toISOString();
 		let url = `/bandwidth?start=${startISO}&end=${endISO}`;
@@ -173,35 +175,35 @@ export const tailscaleService = {
 				url += `&nodeId=${encodeURIComponent(ipsOrNodeId)}`;
 			}
 		}
-		return api.get<BandwidthResponse>(url);
+		return api.get<BandwidthResponse>(url, { signal });
 	},
 
-	async getStatsOverview(start: Date, end: Date): Promise<{
+	async getStatsOverview(start: Date, end: Date, signal?: AbortSignal): Promise<{
 		summary: TrafficStatsSummary;
 		buckets: TrafficStatsBucket[];
 		metadata: { start: string; end: string; bucketCount: number; source: string };
 	}> {
 		const startISO = start.toISOString();
 		const endISO = end.toISOString();
-		return api.get(`/stats/overview?start=${startISO}&end=${endISO}`);
+		return api.get(`/stats/overview?start=${startISO}&end=${endISO}`, { signal });
 	},
 
-	async getTopTalkers(start: Date, end: Date, limit = 10): Promise<{
+	async getTopTalkers(start: Date, end: Date, limit = 10, signal?: AbortSignal): Promise<{
 		talkers: TopTalker[];
 		metadata: { start: string; end: string; limit: number; count: number };
 	}> {
 		const startISO = start.toISOString();
 		const endISO = end.toISOString();
-		return api.get(`/stats/top-talkers?start=${startISO}&end=${endISO}&limit=${limit}`);
+		return api.get(`/stats/top-talkers?start=${startISO}&end=${endISO}&limit=${limit}`, { signal });
 	},
 
-	async getTopPairs(start: Date, end: Date, limit = 10): Promise<{
+	async getTopPairs(start: Date, end: Date, limit = 10, signal?: AbortSignal): Promise<{
 		pairs: TopPair[];
 		metadata: { start: string; end: string; limit: number; count: number };
 	}> {
 		const startISO = start.toISOString();
 		const endISO = end.toISOString();
-		return api.get(`/stats/top-pairs?start=${startISO}&end=${endISO}&limit=${limit}`);
+		return api.get(`/stats/top-pairs?start=${startISO}&end=${endISO}&limit=${limit}`, { signal });
 	},
 
 	async getNodeStats(nodeId: string, start: Date, end: Date): Promise<NodeDetailStats> {

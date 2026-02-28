@@ -25,9 +25,8 @@
 
 	let { nodes, edges }: Props = $props();
 
-	// Register custom node types (cast to any for Svelte 5 compatibility)
 	const nodeTypes = {
-		network: NetworkNode as any
+		network: NetworkNode as unknown as typeof NetworkNode
 	};
 
 	// Get edge style based on traffic type and selection state
@@ -58,6 +57,9 @@
 
 	// Keep track of original edges for style updates (use $state.raw for reference tracking)
 	let originalEdges = $state.raw<NetworkLink[]>([]);
+
+	// Pre-built map for O(1) edge lookups instead of O(n) .find() in .map()
+	const originalEdgeMap = $derived(new Map(originalEdges.map((e) => [e.id, e])));
 
 	// Map our theme to xyflow colorMode
 	const colorMode = $derived.by((): ColorMode => {
@@ -100,9 +102,10 @@
 	const flowNodesStore = writable<Node[]>([]);
 	const flowEdgesStore = writable<Edge[]>([]);
 
-	// Track if we've already laid out these nodes
-	let lastNodeIds = '';
+	// Track topology (node IDs + edge connections, excluding traffic volumes)
+	let lastTopologyKey = '';
 	let isLayouting = $state(false);
+	let layoutDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// Store references to flow functions (set by child component)
 	let fitBoundsRef: ((bounds: { x: number; y: number; width: number; height: number }, options?: { duration?: number; padding?: number }) => void) | null = null;
@@ -147,34 +150,43 @@
 		);
 	}
 
-	// Track edge IDs and total bytes for change detection
+	// Track edge traffic data for style-only updates
 	let lastEdgeKey = '';
+
+	// Build a topology key from node IDs + edge connections (ignoring traffic volumes)
+	function buildTopologyKey(nodeList: NetworkNodeType[], edgeList: NetworkLink[]): string {
+		const nodesPart = nodeList.map((n) => n.id).sort().join(',');
+		const edgesPart = edgeList.map((e) => `${e.source}->${e.target}`).sort().join(',');
+		return `${nodesPart}|${edgesPart}`;
+	}
 
 	// Update stores and apply layout when props change
 	$effect(() => {
-		const currentNodeIds = nodes.map((n) => n.id).sort().join(',');
-		// Create a key that captures edge identity AND traffic data
+		const currentTopologyKey = buildTopologyKey(nodes, edges);
 		const currentEdgeKey = edges.map((e) => `${e.id}:${e.totalBytes}`).sort().join(',');
 
-		// Only re-layout if nodes changed
-		if (currentNodeIds !== lastNodeIds && nodes.length > 0) {
-			lastNodeIds = currentNodeIds;
+		if (currentTopologyKey !== lastTopologyKey && nodes.length > 0) {
+			// Topology changed - debounce re-layout to batch rapid changes
+			lastTopologyKey = currentTopologyKey;
 			lastEdgeKey = currentEdgeKey;
-			// Call layoutNodes first - it sets isLayouting = true synchronously
-			// This ensures Effect 2 knows we're layouting when it sees originalEdges change
-			layoutNodes();
-			// Update originalEdges AFTER layoutNodes starts (so isLayouting is true)
 			originalEdges = edges;
+
+			if (layoutDebounceTimer) clearTimeout(layoutDebounceTimer);
+			layoutDebounceTimer = setTimeout(() => {
+				layoutDebounceTimer = null;
+				layoutNodes();
+			}, 100);
 		} else if (currentEdgeKey !== lastEdgeKey && !isLayouting) {
-			// Edge data changed but nodes didn't - update edge styles without re-layout
+			// Only traffic volumes changed - update edge styles without re-layout
 			lastEdgeKey = currentEdgeKey;
 			originalEdges = edges;
 			const highlighted = $highlightedEdgeIds;
 			const isSelectionActive = $hasSelection;
 
+			const edgeLookup = new Map(edges.map((e) => [e.id, e]));
 			flowEdgesStore.update((currentEdges) => {
 				return currentEdges.map((flowEdge) => {
-					const originalEdge = edges.find((e) => e.id === flowEdge.id);
+					const originalEdge = edgeLookup.get(flowEdge.id);
 					if (!originalEdge) return flowEdge;
 
 					const dimmed = isSelectionActive && !highlighted.has(flowEdge.id);
@@ -185,9 +197,15 @@
 				});
 			});
 		} else {
-			// No layout or edge key change, but still keep originalEdges in sync
 			originalEdges = edges;
 		}
+	});
+
+	// Cleanup debounce timer on destroy
+	$effect(() => {
+		return () => {
+			if (layoutDebounceTimer) clearTimeout(layoutDebounceTimer);
+		};
 	});
 
 	// Track pending style update during layout
@@ -197,6 +215,7 @@
 	$effect(() => {
 		const highlighted = $highlightedEdgeIds;
 		const isSelectionActive = $hasSelection;
+		const edgeLookup = originalEdgeMap;
 
 		// Only update if we have edges
 		if (originalEdges.length === 0) return;
@@ -209,7 +228,7 @@
 
 		flowEdgesStore.update((currentEdges) => {
 			return currentEdges.map((flowEdge) => {
-				const originalEdge = originalEdges.find((e) => e.id === flowEdge.id);
+				const originalEdge = edgeLookup.get(flowEdge.id);
 				if (!originalEdge) return flowEdge;
 
 				const dimmed = isSelectionActive && !highlighted.has(flowEdge.id);
@@ -227,10 +246,11 @@
 			pendingStyleUpdate = false;
 			const highlighted = $highlightedEdgeIds;
 			const isSelectionActive = $hasSelection;
+			const edgeLookup = originalEdgeMap;
 
 			flowEdgesStore.update((currentEdges) => {
 				return currentEdges.map((flowEdge) => {
-					const originalEdge = originalEdges.find((e) => e.id === flowEdge.id);
+					const originalEdge = edgeLookup.get(flowEdge.id);
 					if (!originalEdge) return flowEdge;
 
 					const dimmed = isSelectionActive && !highlighted.has(flowEdge.id);
@@ -344,11 +364,14 @@
 		if (fitViewRef) fitViewRef({ duration: 400, padding: 0.1 });
 	}
 
-	// Capture flow instance when mounted
+	// Capture flow instance when mounted, defer fitView for smoother rendering
 	function captureFlowInstance() {
 		const { fitBounds, fitView } = useSvelteFlow();
 		fitBoundsRef = fitBounds;
 		fitViewRef = fitView;
+		requestAnimationFrame(() => {
+			fitView({ duration: 300, padding: 0.1 });
+		});
 	}
 </script>
 
@@ -364,7 +387,6 @@
 				edges={$flowEdgesStore}
 				{nodeTypes}
 				{colorMode}
-				fitView
 				minZoom={0.01}
 				maxZoom={10}
 				proOptions={{ hideAttribution: true }}

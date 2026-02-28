@@ -51,17 +51,14 @@ func LongCacheConfig() CacheConfig {
 	}
 }
 
-// CacheMiddleware adds cache control headers based on configuration
+// CacheMiddleware adds cache control headers based on configuration.
+// Headers must be set BEFORE c.Next() because the handler flushes the response.
 func CacheMiddleware(config CacheConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Next()
-
-		// Only cache successful GET requests
-		if c.Request.Method != "GET" || c.Writer.Status() >= 400 {
-			return
+		if c.Request.Method == "GET" {
+			setCacheHeaders(c, config)
 		}
-
-		setCacheHeaders(c, config)
+		c.Next()
 	}
 }
 
@@ -122,22 +119,17 @@ func ETagMiddleware() gin.HandlerFunc {
 	}
 }
 
-// ConditionalCacheHeaders adds time-based cache headers
-// Useful for endpoints that return time-series data
+// ConditionalCacheHeaders adds time-based cache headers.
+// Headers must be set BEFORE c.Next() because the handler flushes the response.
 func ConditionalCacheHeaders(isHistorical bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if c.Request.Method == "GET" {
+			if isHistorical {
+				setCacheHeaders(c, LongCacheConfig())
+			} else {
+				setCacheHeaders(c, ShortCacheConfig())
+			}
+		}
 		c.Next()
-
-		if c.Request.Method != "GET" || c.Writer.Status() >= 400 {
-			return
-		}
-
-		if isHistorical {
-			// Historical data can be cached longer since it doesn't change
-			setCacheHeaders(c, LongCacheConfig())
-		} else {
-			// Live data needs shorter cache
-			setCacheHeaders(c, ShortCacheConfig())
-		}
 	}
 }

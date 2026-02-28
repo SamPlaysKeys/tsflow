@@ -1,6 +1,7 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import { tailscaleService } from '$lib/services/tailscale-service';
-import { queryTimeWindow } from './data-source-store';
+import { dataSourceStore } from './data-source-store';
+import { timeRangeStore, TIME_RANGES } from './filter-store';
 import type { TrafficStatsSummary, TrafficStatsBucket, TopTalker, TopPair, PortStat } from '$lib/types';
 
 interface StatsState {
@@ -24,25 +25,118 @@ const defaultState: StatsState = {
 const statsState = writable<StatsState>(defaultState);
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+let statsController: AbortController | null = null;
 
-export async function loadStats() {
+// Retry state
+const MAX_RETRIES = 3;
+export const statsRetryCount = writable(0);
+export const statsRetryingIn = writable<number | null>(null);
+let statsRetryTimeout: ReturnType<typeof setTimeout> | null = null;
+let statsRetryTickInterval: ReturnType<typeof setInterval> | null = null;
+
+function clearStatsRetryState() {
+	if (statsRetryTimeout) {
+		clearTimeout(statsRetryTimeout);
+		statsRetryTimeout = null;
+	}
+	if (statsRetryTickInterval) {
+		clearInterval(statsRetryTickInterval);
+		statsRetryTickInterval = null;
+	}
+	statsRetryCount.set(0);
+	statsRetryingIn.set(null);
+}
+
+function scheduleStatsRetry(attempt: number) {
+	if (statsRetryTickInterval) {
+		clearInterval(statsRetryTickInterval);
+	}
+
+	const delaySec = Math.pow(2, attempt - 1);
+	statsRetryingIn.set(delaySec);
+
+	let remaining = delaySec;
+	statsRetryTickInterval = setInterval(() => {
+		remaining--;
+		if (remaining > 0) {
+			statsRetryingIn.set(remaining);
+		} else {
+			if (statsRetryTickInterval) {
+				clearInterval(statsRetryTickInterval);
+				statsRetryTickInterval = null;
+			}
+		}
+	}, 1000);
+
+	statsRetryTimeout = setTimeout(() => {
+		statsRetryingIn.set(null);
+		loadStats(attempt);
+	}, delaySec * 1000);
+}
+
+export async function loadStats(currentAttempt = 0) {
+	if (statsController) {
+		statsController.abort();
+	}
+	statsController = new AbortController();
+	const signal = statsController.signal;
+
 	statsState.update((s) => ({ ...s, isLoading: true, error: null }));
 
 	try {
+		// Compute time window fresh each call to avoid stale derived store values.
 		let start: Date;
 		let end: Date;
 
-		const unsubscribe = queryTimeWindow.subscribe((tw) => {
-			start = tw.start;
-			end = tw.end;
-		});
-		unsubscribe();
+		let ds = get(dataSourceStore);
 
-		const [overviewRes, talkersRes, pairsRes] = await Promise.all([
-			tailscaleService.getStatsOverview(start!, end!),
-			tailscaleService.getTopTalkers(start!, end!, 15),
-			tailscaleService.getTopPairs(start!, end!, 15)
+		if (ds.mode === 'historical' && ds.selectedStart && ds.selectedEnd) {
+			start = ds.selectedStart;
+			end = ds.selectedEnd;
+		} else {
+			// Live mode - use time range store (same as network data)
+			const timeRange = get(timeRangeStore);
+			if (timeRange.selected === 'custom' && timeRange.customStart && timeRange.customEnd) {
+				start = timeRange.customStart;
+				end = timeRange.customEnd;
+			} else {
+				const preset = TIME_RANGES.find((p) => p.value === timeRange.selected);
+				end = new Date();
+				start = new Date(end.getTime() - (preset?.minutes || 5) * 60 * 1000);
+			}
+		}
+
+		let [overviewRes, talkersRes, pairsRes] = await Promise.all([
+			tailscaleService.getStatsOverview(start, end, signal),
+			tailscaleService.getTopTalkers(start, end, 15, signal),
+			tailscaleService.getTopPairs(start, end, 15, signal)
 		]);
+
+		if (signal.aborted) return;
+
+		// If live mode returned empty stats, fall back to stored data range
+		const liveEmpty = ds.mode !== 'historical'
+			&& (!overviewRes.summary || overviewRes.summary.totalFlows === 0)
+			&& (!talkersRes.talkers || talkersRes.talkers.length === 0);
+
+		if (liveEmpty) {
+			if (!ds.dataRange) {
+				await dataSourceStore.fetchDataRange();
+				ds = get(dataSourceStore);
+			}
+			if (ds.dataRange && ds.dataRange.count > 0) {
+				const rangeStart = new Date(ds.dataRange.earliest);
+				const rangeEnd = new Date(ds.dataRange.latest);
+				if (rangeStart.getFullYear() > 1970 && rangeEnd > rangeStart) {
+					[overviewRes, talkersRes, pairsRes] = await Promise.all([
+						tailscaleService.getStatsOverview(rangeStart, rangeEnd, signal),
+						tailscaleService.getTopTalkers(rangeStart, rangeEnd, 15, signal),
+						tailscaleService.getTopPairs(rangeStart, rangeEnd, 15, signal)
+					]);
+					if (signal.aborted) return;
+				}
+			}
+		}
 
 		statsState.set({
 			summary: overviewRes.summary,
@@ -52,19 +146,35 @@ export async function loadStats() {
 			isLoading: false,
 			error: null
 		});
+		clearStatsRetryState();
 	} catch (err) {
+		if (signal.aborted) return;
+		console.error('Failed to load stats:', err);
 		statsState.update((s) => ({
 			...s,
 			isLoading: false,
 			error: err instanceof Error ? err.message : 'Failed to load stats'
 		}));
+
+		const nextAttempt = currentAttempt + 1;
+		statsRetryCount.set(nextAttempt);
+		if (nextAttempt < MAX_RETRIES) {
+			scheduleStatsRetry(nextAttempt);
+		}
 	}
+}
+
+export function retryLoadStats() {
+	clearStatsRetryState();
+	loadStats(0);
 }
 
 export function startStatsRefresh(intervalMs = 60_000) {
 	stopStatsRefresh();
 	loadStats();
-	refreshTimer = setInterval(loadStats, intervalMs);
+	// Don't auto-refresh in historical mode - data is static
+	if (get(dataSourceStore).mode === 'historical') return;
+	refreshTimer = setInterval(() => loadStats(0), intervalMs);
 }
 
 export function stopStatsRefresh() {

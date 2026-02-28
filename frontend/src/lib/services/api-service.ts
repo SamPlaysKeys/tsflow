@@ -33,11 +33,13 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 }
 
 export const api = {
-	get: <T>(endpoint: string) => request<T>(endpoint, { method: 'GET' }),
-	post: <T>(endpoint: string, body: unknown) =>
+	get: <T>(endpoint: string, options?: { signal?: AbortSignal }) =>
+		request<T>(endpoint, { method: 'GET', signal: options?.signal }),
+	post: <T>(endpoint: string, body: unknown, options?: { signal?: AbortSignal }) =>
 		request<T>(endpoint, {
 			method: 'POST',
-			body: JSON.stringify(body)
+			body: JSON.stringify(body),
+			signal: options?.signal
 		})
 };
 

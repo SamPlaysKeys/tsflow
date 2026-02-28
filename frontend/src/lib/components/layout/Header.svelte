@@ -1,9 +1,28 @@
 <script lang="ts">
 	import { RefreshCw, PanelLeft, ScrollText, Sun, Moon, Monitor, Network, Link, Activity, BarChart3 } from 'lucide-svelte';
 	import { page } from '$app/stores';
-	import { uiStore, loadNetworkData, networkStats, filteredNodes, themeStore } from '$lib/stores';
+	import { uiStore, loadNetworkData, networkStats, filteredNodes, lastUpdated, isAutoRefreshing, themeStore, statsSummary, topTalkers } from '$lib/stores';
 	import { formatBytes } from '$lib/utils';
 	import type { ThemeMode } from '$lib/stores';
+
+	// Tick every 10s to keep the relative time fresh
+	let tick = $state(0);
+	$effect(() => {
+		const interval = setInterval(() => tick++, 10_000);
+		return () => clearInterval(interval);
+	});
+
+	const lastUpdatedLabel = $derived.by(() => {
+		void tick; // subscribe to tick for periodic re-computation
+		const ts = $lastUpdated;
+		if (!ts) return null;
+		const now = Date.now();
+		const diffSec = Math.floor((now - ts.getTime()) / 1000);
+		if (diffSec < 5) return 'just now';
+		if (diffSec < 60) return `${diffSec}s ago`;
+		const diffMin = Math.floor(diffSec / 60);
+		return `${diffMin}m ago`;
+	});
 
 	const currentPath = $derived($page.url.pathname);
 
@@ -15,9 +34,21 @@
 		isRefreshing = false;
 	}
 
+	// Smart stats: use network store data when available, fall back to stats store
+	const hasNetworkData = $derived($networkStats.totalNodes > 0);
+
+	const displayNodes = $derived(hasNetworkData ? $networkStats.totalNodes : $topTalkers.length);
+	const displayFlows = $derived(hasNetworkData ? $networkStats.totalConnections : ($statsSummary?.totalFlows ?? 0));
+	const displayBytes = $derived.by(() => {
+		if (hasNetworkData) return $networkStats.totalBytes;
+		if (!$statsSummary) return 0;
+		const protoTotal = $statsSummary.tcpBytes + $statsSummary.udpBytes + $statsSummary.otherProtoBytes;
+		return protoTotal > 0 ? protoTotal : $statsSummary.virtualBytes + $statsSummary.subnetBytes;
+	});
+
 	const avgTrafficPerNode = $derived.by(() => {
-		if ($networkStats.totalNodes === 0) return 0;
-		return $networkStats.totalBytes / $networkStats.totalNodes;
+		if (displayNodes === 0) return 0;
+		return displayBytes / displayNodes;
 	});
 
 	const peakNode = $derived.by(() => {
@@ -100,15 +131,15 @@
 		<div class="flex items-center gap-2">
 			<Network class="h-4 w-4 text-muted-foreground" />
 			<div class="text-sm">
-				<span class="font-semibold">{$networkStats.totalNodes}</span>
-				<span class="text-muted-foreground"> nodes</span>
+				<span class="font-semibold">{displayNodes}</span>
+				<span class="text-muted-foreground"> {hasNetworkData ? 'nodes' : 'devices'}</span>
 			</div>
 		</div>
 
 		<div class="flex items-center gap-2">
 			<Link class="h-4 w-4 text-muted-foreground" />
 			<div class="text-sm">
-				<span class="font-semibold">{$networkStats.totalConnections}</span>
+				<span class="font-semibold">{hasNetworkData ? displayFlows : displayFlows.toLocaleString()}</span>
 				<span class="text-muted-foreground"> flows</span>
 			</div>
 		</div>
@@ -117,7 +148,7 @@
 
 		<div class="text-sm">
 			<span class="text-muted-foreground">Traffic:</span>
-			<span class="ml-1 font-semibold text-primary">{formatBytes($networkStats.totalBytes)}</span>
+			<span class="ml-1 font-semibold text-primary">{formatBytes(displayBytes)}</span>
 		</div>
 
 		<div class="text-sm">
@@ -132,26 +163,49 @@
 				<span class="ml-1 text-xs text-muted-foreground">({formatBytes(peakNode.totalBytes)})</span>
 			</div>
 		{/if}
+
+		{#if lastUpdatedLabel}
+			<div class="h-6 w-px bg-border"></div>
+			<div class="text-xs text-muted-foreground/70" title={$lastUpdated?.toLocaleString()}>
+				Updated {lastUpdatedLabel}
+			</div>
+		{/if}
+	</div>
+
+	<!-- Compact stats for mobile (<md) -->
+	<div class="flex items-center gap-2 md:hidden">
+		<span class="text-[10px] font-semibold tabular-nums">{displayNodes}<span class="font-normal text-muted-foreground">n</span></span>
+		<span class="text-[10px] font-semibold tabular-nums text-primary">{formatBytes(displayBytes)}</span>
 	</div>
 
 	<!-- Compact stats for tablet (md only) -->
 	<div class="hidden items-center gap-3 md:flex lg:hidden">
 		<div class="text-xs">
-			<span class="font-semibold">{$networkStats.totalNodes}</span>
-			<span class="text-muted-foreground"> nodes</span>
+			<span class="font-semibold">{displayNodes}</span>
+			<span class="text-muted-foreground"> {hasNetworkData ? 'nodes' : 'devices'}</span>
 		</div>
 		<div class="text-xs">
-			<span class="font-semibold text-primary">{formatBytes($networkStats.totalBytes)}</span>
+			<span class="font-semibold text-primary">{formatBytes(displayBytes)}</span>
 		</div>
+		{#if lastUpdatedLabel}
+			<div class="text-[10px] text-muted-foreground/60">{lastUpdatedLabel}</div>
+		{/if}
 	</div>
 
 	<!-- Right section: Actions -->
 	<div class="flex items-center gap-1 sm:gap-2">
 		<button
 			onclick={handleRefresh}
-			class="flex items-center gap-2 rounded-md p-2.5 hover:bg-secondary sm:px-3 sm:py-1.5"
+			class="relative flex items-center gap-2 rounded-md p-2.5 hover:bg-secondary sm:px-3 sm:py-1.5"
 			disabled={isRefreshing}
+			title={$isAutoRefreshing ? 'Auto-refreshing every 60s (R to manual refresh)' : 'Refresh (R)'}
 		>
+			{#if $isAutoRefreshing}
+				<span class="absolute -right-0.5 -top-0.5 flex h-2.5 w-2.5">
+					<span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/60"></span>
+					<span class="relative inline-flex h-2.5 w-2.5 rounded-full bg-primary"></span>
+				</span>
+			{/if}
 			<RefreshCw class="h-4 w-4 {isRefreshing ? 'animate-spin' : ''}" />
 			<span class="hidden text-sm sm:inline">Refresh</span>
 		</button>

@@ -9,6 +9,7 @@
 		startStatsRefresh,
 		stopStatsRefresh,
 		statsSummary,
+		statsBuckets,
 		topTalkers,
 		topPairs,
 		topPorts,
@@ -102,11 +103,13 @@
 		}));
 	});
 
-	const totalBytes = $derived(
-		$statsSummary
-			? $statsSummary.tcpBytes + $statsSummary.udpBytes + $statsSummary.otherProtoBytes
-			: 0
-	);
+	const totalBytes = $derived.by(() => {
+		if (!$statsSummary) return 0;
+		// Use protocol breakdown when available, otherwise fall back to traffic type totals
+		const protoTotal = $statsSummary.tcpBytes + $statsSummary.udpBytes + $statsSummary.otherProtoBytes;
+		if (protoTotal > 0) return protoTotal;
+		return $statsSummary.virtualBytes + $statsSummary.subnetBytes;
+	});
 
 	const timeWindowLabel = $derived.by(() => {
 		const tw = $queryTimeWindow;
@@ -118,6 +121,11 @@
 		const days = Math.round(hrs / 24);
 		return `Last ${days}d`;
 	});
+
+	// Sparkline data derived from stats buckets
+	const trafficSparkline = $derived($statsBuckets.map((b) => b.tcpBytes + b.udpBytes + b.otherProtoBytes));
+	const flowsSparkline = $derived($statsBuckets.map((b) => b.totalFlows));
+	const pairsSparkline = $derived($statsBuckets.map((b) => b.uniquePairs));
 
 	function nodeLabel(id: string, displayName?: string): string {
 		if (displayName) return displayName;
@@ -141,13 +149,15 @@
 		{:else}
 			<!-- Overview Cards -->
 			<div class="mb-4 grid grid-cols-2 gap-2 sm:mb-6 sm:gap-4 lg:grid-cols-4">
-				<StatCard label="Total Traffic" value={formatBytes(totalBytes)} subtitle={timeWindowLabel}>
+				<StatCard label="Total Traffic" value={formatBytes(totalBytes)} subtitle={timeWindowLabel} sparkline={trafficSparkline}>
 					{#snippet icon()}<Activity class="h-4 w-4" />{/snippet}
 				</StatCard>
 				<StatCard
 					label="Total Flows"
 					value={($statsSummary?.totalFlows ?? 0).toLocaleString()}
 					subtitle={timeWindowLabel}
+					sparkline={flowsSparkline}
+					sparkColor="var(--color-traffic-subnet)"
 				>
 					{#snippet icon()}<ArrowUpDown class="h-4 w-4" />{/snippet}
 				</StatCard>
@@ -155,6 +165,8 @@
 					label="Unique Pairs"
 					value={($statsSummary?.uniquePairs ?? 0).toLocaleString()}
 					subtitle="Device pairs"
+					sparkline={pairsSparkline}
+					sparkColor="var(--color-traffic-virtual)"
 				>
 					{#snippet icon()}<Link class="h-4 w-4" />{/snippet}
 				</StatCard>
@@ -189,6 +201,13 @@
 				<div class="rounded-lg border border-border bg-card p-3 sm:p-4">
 					<h3 class="mb-3 text-sm font-medium text-muted-foreground">Top Talkers</h3>
 
+					{#if sortedTalkers.length === 0}
+						<div class="flex flex-col items-center justify-center py-8 text-center">
+							<Network class="mb-2 h-8 w-8 text-muted-foreground/30" />
+							<p class="text-sm text-muted-foreground">No device traffic recorded yet</p>
+							<p class="mt-1 text-xs text-muted-foreground/60">Traffic data will appear here once devices start communicating</p>
+						</div>
+					{:else}
 					<!-- Desktop/Tablet table -->
 					<div class="hidden overflow-x-auto sm:block">
 						<table class="w-full text-sm">
@@ -199,18 +218,24 @@
 									<th
 										class="cursor-pointer select-none pb-2 pr-4 text-right transition-colors hover:text-foreground"
 										onclick={() => toggleTalkerSort('txBytes')}
+										aria-sort={talkerSort === 'txBytes' ? (talkerSortDir === 'desc' ? 'descending' : 'ascending') : 'none'}
+										aria-label="Sort by transmitted bytes"
 									>
 										TX{sortArrow(talkerSort === 'txBytes', talkerSortDir)}
 									</th>
 									<th
 										class="cursor-pointer select-none pb-2 pr-4 text-right transition-colors hover:text-foreground"
 										onclick={() => toggleTalkerSort('rxBytes')}
+										aria-sort={talkerSort === 'rxBytes' ? (talkerSortDir === 'desc' ? 'descending' : 'ascending') : 'none'}
+										aria-label="Sort by received bytes"
 									>
 										RX{sortArrow(talkerSort === 'rxBytes', talkerSortDir)}
 									</th>
 									<th
 										class="cursor-pointer select-none pb-2 text-right transition-colors hover:text-foreground"
 										onclick={() => toggleTalkerSort('totalBytes')}
+										aria-sort={talkerSort === 'totalBytes' ? (talkerSortDir === 'desc' ? 'descending' : 'ascending') : 'none'}
+										aria-label="Sort by total bytes"
 									>
 										Total{sortArrow(talkerSort === 'totalBytes', talkerSortDir)}
 									</th>
@@ -268,12 +293,20 @@
 							</div>
 						{/each}
 					</div>
+					{/if}
 				</div>
 
 				<!-- Top Pairs -->
 				<div class="rounded-lg border border-border bg-card p-3 sm:p-4">
 					<h3 class="mb-3 text-sm font-medium text-muted-foreground">Top Pairs</h3>
 
+					{#if sortedPairs.length === 0}
+						<div class="flex flex-col items-center justify-center py-8 text-center">
+							<Link class="mb-2 h-8 w-8 text-muted-foreground/30" />
+							<p class="text-sm text-muted-foreground">No communication pairs detected</p>
+							<p class="mt-1 text-xs text-muted-foreground/60">Pairs will appear once traffic flows between devices</p>
+						</div>
+					{:else}
 					<!-- Desktop/Tablet table -->
 					<div class="hidden overflow-x-auto sm:block">
 						<table class="w-full text-sm">
@@ -285,12 +318,16 @@
 									<th
 										class="cursor-pointer select-none pb-2 pr-4 text-right transition-colors hover:text-foreground"
 										onclick={() => togglePairSort('totalBytes')}
+										aria-sort={pairSort === 'totalBytes' ? (pairSortDir === 'desc' ? 'descending' : 'ascending') : 'none'}
+										aria-label="Sort by traffic volume"
 									>
 										Traffic{sortArrow(pairSort === 'totalBytes', pairSortDir)}
 									</th>
 									<th
 										class="cursor-pointer select-none pb-2 text-right transition-colors hover:text-foreground"
 										onclick={() => togglePairSort('flowCount')}
+										aria-sort={pairSort === 'flowCount' ? (pairSortDir === 'desc' ? 'descending' : 'ascending') : 'none'}
+										aria-label="Sort by flow count"
 									>
 										Flows{sortArrow(pairSort === 'flowCount', pairSortDir)}
 									</th>
@@ -367,6 +404,7 @@
 							</div>
 						{/each}
 					</div>
+					{/if}
 				</div>
 			</div>
 

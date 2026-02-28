@@ -34,6 +34,9 @@
 		{#if total === 0}
 			<circle cx={center} cy={center} r={radius} fill="none"
 				stroke="currentColor" stroke-width={strokeWidth} class="text-muted/20" />
+			<text x={center} y={center + 4} text-anchor="middle" class="fill-muted-foreground" style="font-size: 12px;">
+				No data
+			</text>
 		{:else}
 			{#each arcs as arc}
 				<circle cx={center} cy={center} r={radius} fill="none"

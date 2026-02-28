@@ -1,14 +1,24 @@
 <script lang="ts">
 	import { rawLogs, uiStore, filteredNodes, filteredEdges, processedNetwork, filterStore, debouncedFilterStore, devices, services, primaryMatchedNodes } from '$lib/stores';
-	import { formatBytes, formatDate, extractIP, getProtocolName } from '$lib/utils';
-	import { ArrowRight } from 'lucide-svelte';
+	import { formatBytes, formatTime, extractIP, getProtocolName } from '$lib/utils';
+	import { ArrowRight, ArrowUpDown } from 'lucide-svelte';
 	import type { NetworkLog, TrafficType } from '$lib/types';
+
+	type SortField = 'logged' | 'txBytes' | 'rxBytes' | 'trafficType' | 'protocol';
+	let sortField: SortField = $state('logged');
+	let sortDir: 'asc' | 'desc' = $state('desc');
+
+	// Derive a display name for a device, skipping "localhost" (common on mobile devices)
+	function deviceDisplayName(device: { hostname?: string; name: string }): string {
+		if (device.hostname && device.hostname !== 'localhost') return device.hostname;
+		return device.name.split('.')[0] || device.name;
+	}
 
 	// Build IP to device name lookup map
 	const ipToDevice = $derived.by(() => {
 		const map = new Map<string, string>();
 		for (const device of $devices) {
-			const displayName = device.hostname || device.name.split('.')[0];
+			const displayName = deviceDisplayName(device);
 			for (const addr of device.addresses) {
 				map.set(addr, displayName);
 			}
@@ -20,8 +30,19 @@
 	const deviceIdToName = $derived.by(() => {
 		const map = new Map<string, string>();
 		for (const device of $devices) {
-			const displayName = device.hostname || device.name.split('.')[0];
+			const displayName = deviceDisplayName(device);
 			map.set(device.id, displayName);
+		}
+		return map;
+	});
+
+	// Build device ID to primary IP mapping (for resolving aggregated flow addresses)
+	const deviceIdToIP = $derived.by(() => {
+		const map = new Map<string, string>();
+		for (const device of $devices) {
+			if (device.addresses.length > 0) {
+				map.set(device.id, device.addresses[0]);
+			}
 		}
 		return map;
 	});
@@ -37,6 +58,13 @@
 		}
 		return map;
 	});
+
+	// Resolve an address (could be IP:port or device ID) to its IP.
+	// In historical mode, aggregated flows use device IDs as src/dst instead of IP:port.
+	function resolveToNodeIP(address: string): string {
+		const ip = extractIP(address);
+		return deviceIdToIP.get(ip) || ip;
+	}
 
 	// Helper to resolve IP or device ID to device/service name
 	function resolveIP(address: string): { ip: string; port?: string; deviceName?: string } {
@@ -111,13 +139,15 @@
 
 			const allTraffic = [
 				...(log.virtualTraffic || []),
+				...(log.exitTraffic || []),
 				...(log.subnetTraffic || []),
 				...(log.physicalTraffic || [])
 			];
 
 			const matches = allTraffic.some((traffic) => {
-				const srcIP = extractIP(traffic.src);
-				const dstIP = extractIP(traffic.dst);
+				// resolveToNodeIP handles both IP:port (live) and device ID (historical)
+				const srcIP = resolveToNodeIP(traffic.src);
+				const dstIP = resolveToNodeIP(traffic.dst);
 
 				if (selectedNodeIPs) {
 					return selectedNodeIPs.has(srcIP) || selectedNodeIPs.has(dstIP);
@@ -177,8 +207,8 @@
 			for (const t of traffic) {
 				if (entries.length >= MAX_ENTRIES) return false;
 
-				const srcIP = extractIP(t.src);
-				const dstIP = extractIP(t.dst);
+				const srcIP = resolveToNodeIP(t.src);
+				const dstIP = resolveToNodeIP(t.dst);
 
 				if (selectedNodeIPsSet) {
 					if (!selectedNodeIPsSet.has(srcIP) && !selectedNodeIPsSet.has(dstIP)) continue;
@@ -207,6 +237,7 @@
 		for (const log of filteredLogs) {
 			if (entries.length >= MAX_ENTRIES) break;
 			if (!processTraffic(log.virtualTraffic, 'virtual', log.logged)) break;
+			if (!processTraffic(log.exitTraffic, 'exit', log.logged)) break;
 			if (!processTraffic(log.subnetTraffic, 'subnet', log.logged)) break;
 			if (!processTraffic(log.physicalTraffic, 'physical', log.logged)) break;
 		}
@@ -214,9 +245,53 @@
 		return entries;
 	});
 
+	const isTruncated = $derived(flattenedEntries.length >= 500);
+	const hasRawLogs = $derived($rawLogs.length > 0);
+
+	// Sort entries
+	const sortedEntries = $derived.by(() => {
+		if (sortField === 'logged' && sortDir === 'desc') return flattenedEntries; // default order
+		const mul = sortDir === 'desc' ? -1 : 1;
+		return [...flattenedEntries].sort((a, b) => {
+			switch (sortField) {
+				case 'logged': return mul * (new Date(a.logged).getTime() - new Date(b.logged).getTime());
+				case 'txBytes': return mul * (a.txBytes - b.txBytes);
+				case 'rxBytes': return mul * (a.rxBytes - b.rxBytes);
+				case 'trafficType': return mul * a.trafficType.localeCompare(b.trafficType);
+				case 'protocol': return mul * a.protocol.localeCompare(b.protocol);
+				default: return 0;
+			}
+		});
+	});
+
+	// Summary stats
+	const entrySummary = $derived.by(() => {
+		let totalTx = 0, totalRx = 0;
+		for (const e of flattenedEntries) {
+			totalTx += e.txBytes;
+			totalRx += e.rxBytes;
+		}
+		return { count: flattenedEntries.length, totalTx, totalRx };
+	});
+
+	function toggleSort(field: SortField) {
+		if (sortField === field) {
+			sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+		} else {
+			sortField = field;
+			sortDir = 'desc';
+		}
+	}
+
+	function sortIndicator(field: SortField): string {
+		if (sortField !== field) return '';
+		return sortDir === 'desc' ? ' \u25BE' : ' \u25B4';
+	}
+
 	function getTrafficTypeColor(type: string): string {
 		switch (type) {
 			case 'virtual': return 'text-traffic-virtual';
+			case 'exit': return 'text-purple-400';
 			case 'subnet': return 'text-traffic-subnet';
 			case 'physical': return 'text-traffic-physical';
 			default: return 'text-muted-foreground';
@@ -226,6 +301,7 @@
 	function getTrafficTypeBgColor(type: string): string {
 		switch (type) {
 			case 'virtual': return 'bg-traffic-virtual/20';
+			case 'exit': return 'bg-purple-500/20';
 			case 'subnet': return 'bg-traffic-subnet/20';
 			case 'physical': return 'bg-traffic-physical/20';
 			default: return 'bg-muted';
@@ -237,8 +313,8 @@
 	}
 
 	function handleLogClick(entry: FlatTrafficEntry) {
-		const srcIP = extractIP(entry.src);
-		const dstIP = extractIP(entry.dst);
+		const srcIP = resolveToNodeIP(entry.src);
+		const dstIP = resolveToNodeIP(entry.dst);
 
 		const findEdgeByIPs = (edges: typeof $filteredEdges) => {
 			return edges.find((edge) => {
@@ -261,20 +337,31 @@
 </script>
 
 <div class="flex h-full flex-col">
-	<div class="border-b border-border p-2 sm:p-3">
-		<h2 class="text-sm font-semibold">Network Logs</h2>
-		<p class="text-xs text-muted-foreground">
-			{#if $uiStore.selectedNodeId}
-				Showing logs for selected node
-			{:else if $uiStore.selectedEdgeId}
-				Showing logs for selected connection
-			{:else}
-				Showing recent logs (select a node or edge to filter)
-			{/if}
-			{#if $filterStore.trafficTypes.length > 0}
-				<span class="text-primary"> · Filtered: {$filterStore.trafficTypes.join(', ')}</span>
-			{/if}
-		</p>
+	<div class="flex items-center justify-between border-b border-border p-2 sm:p-3">
+		<div>
+			<h2 class="text-sm font-semibold">Network Logs</h2>
+			<p class="text-xs text-muted-foreground">
+				{#if $uiStore.selectedNodeId}
+					Showing logs for selected node
+				{:else if $uiStore.selectedEdgeId}
+					Showing logs for selected connection
+				{:else}
+					Showing recent logs (select a node or edge to filter)
+				{/if}
+				{#if $filterStore.trafficTypes.length > 0}
+					<span class="text-primary"> · Filtered: {$filterStore.trafficTypes.join(', ')}</span>
+				{/if}
+			</p>
+		</div>
+		{#if sortField !== 'logged' || sortDir !== 'desc'}
+			<button
+				class="hidden items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-secondary sm:flex"
+				onclick={() => { sortField = 'logged'; sortDir = 'desc'; }}
+			>
+				<ArrowUpDown class="h-3 w-3" />
+				Reset sort
+			</button>
+		{/if}
 	</div>
 
 	<div class="flex-1 overflow-auto">
@@ -282,16 +369,16 @@
 		<table class="hidden w-full text-xs sm:table">
 			<thead class="sticky top-0 bg-card">
 				<tr class="border-b border-border text-left">
-					<th class="px-2 py-1.5 font-medium">Time</th>
-					<th class="px-2 py-1.5 font-medium">Type</th>
+					<th class="cursor-pointer select-none px-2 py-1.5 font-medium transition-colors hover:text-foreground" onclick={() => toggleSort('logged')}>Time{sortIndicator('logged')}</th>
+					<th class="cursor-pointer select-none px-2 py-1.5 font-medium transition-colors hover:text-foreground" onclick={() => toggleSort('trafficType')}>Type{sortIndicator('trafficType')}</th>
 					<th class="px-2 py-1.5 font-medium">Flow</th>
-					<th class="px-2 py-1.5 font-medium">Proto</th>
-					<th class="px-2 py-1.5 font-medium text-right">TX</th>
-					<th class="px-2 py-1.5 font-medium text-right">RX</th>
+					<th class="cursor-pointer select-none px-2 py-1.5 font-medium transition-colors hover:text-foreground" onclick={() => toggleSort('protocol')}>Proto{sortIndicator('protocol')}</th>
+					<th class="cursor-pointer select-none px-2 py-1.5 font-medium text-right transition-colors hover:text-foreground" onclick={() => toggleSort('txBytes')}>TX{sortIndicator('txBytes')}</th>
+					<th class="cursor-pointer select-none px-2 py-1.5 font-medium text-right transition-colors hover:text-foreground" onclick={() => toggleSort('rxBytes')}>RX{sortIndicator('rxBytes')}</th>
 				</tr>
 			</thead>
 			<tbody>
-				{#each flattenedEntries as entry}
+				{#each sortedEntries as entry}
 					{@const srcResolved = resolveIP(entry.src)}
 					{@const dstResolved = resolveIP(entry.dst)}
 					<tr
@@ -302,7 +389,7 @@
 						onkeydown={(e) => e.key === 'Enter' && handleLogClick(entry)}
 					>
 						<td class="whitespace-nowrap px-2 py-1 text-muted-foreground">
-							{formatDate(entry.logged).split(',')[1]?.trim() || formatDate(entry.logged)}
+							{formatTime(entry.logged)}
 						</td>
 						<td class="px-2 py-1">
 							<span class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 {getTrafficTypeBgColor(entry.trafficType)} {getTrafficTypeColor(entry.trafficType)}">
@@ -341,7 +428,7 @@
 
 		<!-- Mobile card view -->
 		<div class="divide-y divide-border/50 sm:hidden">
-			{#each flattenedEntries as entry}
+			{#each sortedEntries as entry}
 				{@const srcResolved = resolveIP(entry.src)}
 				{@const dstResolved = resolveIP(entry.dst)}
 				<button
@@ -373,7 +460,7 @@
 						</span>
 					</div>
 					<div class="mt-0.5 flex items-center justify-between text-[10px] text-muted-foreground">
-						<span>{formatDate(entry.logged).split(',')[1]?.trim() || formatDate(entry.logged)}</span>
+						<span>{formatTime(entry.logged)}</span>
 						<span>TX {formatBytes(entry.txBytes)} / RX {formatBytes(entry.rxBytes)}</span>
 					</div>
 				</button>
@@ -381,8 +468,29 @@
 		</div>
 
 		{#if flattenedEntries.length === 0}
-			<div class="flex h-32 items-center justify-center text-sm text-muted-foreground">
-				No logs to display
+			<div class="flex h-32 flex-col items-center justify-center gap-1 text-sm text-muted-foreground">
+				{#if !hasRawLogs}
+					<p>No traffic data available</p>
+					<p class="text-xs text-muted-foreground/60">Waiting for network flow logs from the poller</p>
+				{:else if $uiStore.selectedNodeId || $uiStore.selectedEdgeId}
+					<p>No matching flows for this selection</p>
+					<p class="text-xs text-muted-foreground/60">Try selecting a different node or edge</p>
+				{:else if $debouncedFilterStore.search}
+					<p>No flows match your search</p>
+					<p class="text-xs text-muted-foreground/60">Try broadening your search query</p>
+				{:else}
+					<p>No flows match current filters</p>
+					<p class="text-xs text-muted-foreground/60">Check traffic type filters in the sidebar</p>
+				{/if}
+			</div>
+		{/if}
+
+		{#if entrySummary.count > 0}
+			<div class="border-t border-border bg-secondary/30 px-3 py-1.5 text-xs text-muted-foreground">
+				<div class="flex items-center justify-between">
+					<span>{entrySummary.count} entries{isTruncated ? ' (capped)' : ''}</span>
+					<span class="tabular-nums">TX {formatBytes(entrySummary.totalTx)} / RX {formatBytes(entrySummary.totalRx)}</span>
+				</div>
 			</div>
 		{/if}
 	</div>

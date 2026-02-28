@@ -129,8 +129,12 @@ export function processNetworkLogs(
 	const linkMap = new Map<string, NetworkLink>();
 
 	logs.forEach((log) => {
+		// Resolve the reporting node's identity for proper byte attribution
+		const reporterIP = resolveToIP(log.nodeId, devices);
+
 		const allTraffic = [
 			...(log.virtualTraffic || []).map((t) => ({ ...t, type: 'virtual' as TrafficType })),
+			...(log.exitTraffic || []).map((t) => ({ ...t, type: 'exit' as TrafficType })),
 			...(log.subnetTraffic || []).map((t) => ({ ...t, type: 'subnet' as TrafficType })),
 			...(log.physicalTraffic || []).map((t) => ({
 				...t,
@@ -248,16 +252,17 @@ export function processNetworkLogs(
 				}
 			}
 
-			// Update node traffic volumes
+			// Update node traffic volumes using TX-only approach.
+			// Only use txBytes to avoid double-counting when both endpoints report the
+			// same connection. Each byte is counted once as the sender's TX.
+			// rxBytes mirrors the peer's txBytes and would duplicate if both report.
 			const srcNode = nodeMap.get(srcNodeId)!;
 			const dstNode = nodeMap.get(dstNodeId)!;
 
+			// txBytes always represents what the src sent to dst
 			srcNode.txBytes += traffic.txBytes || 0;
-			srcNode.rxBytes += traffic.rxBytes || 0;
+			dstNode.rxBytes += traffic.txBytes || 0;
 			srcNode.totalBytes = srcNode.txBytes + srcNode.rxBytes;
-
-			dstNode.txBytes += traffic.rxBytes || 0;  // What source received = what dest sent
-			dstNode.rxBytes += traffic.txBytes || 0;  // What source sent = what dest received
 			dstNode.totalBytes = dstNode.txBytes + dstNode.rxBytes;
 
 			// Track port and protocol information
@@ -303,11 +308,17 @@ export function processNetworkLogs(
 				});
 			}
 
+			// TX-only link accounting: attribute txBytes based on direction relative
+			// to the sorted link key. This avoids double-counting when both endpoints report.
 			const link = linkMap.get(linkKey)!;
-			link.txBytes += traffic.txBytes || 0;
-			link.rxBytes += traffic.rxBytes || 0;
+			const isSrcFirst = srcNodeId === sortedIds[0];
+			if (isSrcFirst) {
+				link.txBytes += traffic.txBytes || 0;
+			} else {
+				link.rxBytes += traffic.txBytes || 0;
+			}
 			link.totalBytes = link.txBytes + link.rxBytes;
-			link.packets += (traffic.txPkts || 0) + (traffic.rxPkts || 0);
+			link.packets += traffic.txPkts || 0;
 		});
 	});
 

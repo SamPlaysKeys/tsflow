@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { Clock, Database, Radio } from 'lucide-svelte';
 	import { dataSourceStore, hasHistoricalData } from '$lib/stores/data-source-store';
-	import { loadNetworkData } from '$lib/stores';
+	import { loadNetworkData, startAutoRefresh, stopAutoRefresh } from '$lib/stores';
 	import { onMount } from 'svelte';
 
 	// Debounce timer for reloading data
@@ -57,13 +57,10 @@
 		return () => {
 			clearInterval(interval);
 			if (reloadTimeout) clearTimeout(reloadTimeout);
-			// Clean up any drag event listeners if component unmounts while dragging
-			if (dragging) {
-				window.removeEventListener('mousemove', handleMouseMove);
-				window.removeEventListener('mouseup', handleMouseUp);
-				window.removeEventListener('touchmove', handleMouseMove);
-				window.removeEventListener('touchend', handleMouseUp);
-			}
+			window.removeEventListener('mousemove', handleMouseMove);
+			window.removeEventListener('mouseup', handleMouseUp);
+			window.removeEventListener('touchmove', handleMouseMove);
+			window.removeEventListener('touchend', handleMouseUp);
 		};
 	});
 
@@ -124,18 +121,42 @@
 		window.removeEventListener('touchend', handleMouseUp);
 	}
 
+	// Check if the data range has valid (non-zero) timestamps
+	function hasValidDataRange(): boolean {
+		const range = $dataSourceStore.dataRange;
+		if (!range || !range.earliest || !range.latest || range.count === 0) return false;
+		return new Date(range.earliest).getFullYear() > 1970;
+	}
+
 	function toggleMode() {
 		const newMode = $dataSourceStore.mode === 'live' ? 'historical' : 'live';
+
+		if (newMode === 'historical' && !hasValidDataRange()) {
+			// No stored data yet - don't switch
+			return;
+		}
+
 		dataSourceStore.setMode(newMode);
 
 		if (newMode === 'historical') {
+			// Stop auto-refresh - historical data is static
+			stopAutoRefresh();
 			// Set initial range to last 10% of available data
-			const range = $dataSourceStore.dataRange;
-			if (range && range.earliest && range.latest) {
-				startValue = 90;
-				endValue = 100;
-				updateSelectedRange();
+			startValue = 90;
+			endValue = 100;
+			const start = valueToTime(startValue);
+			const end = valueToTime(endValue);
+			if (start && end) {
+				dataSourceStore.setSelectedRange(start, end);
 			}
+		} else {
+			// Restart auto-refresh when switching back to live mode
+			startAutoRefresh(60_000);
+		}
+		// Single load - cancel any pending debounced reload
+		if (reloadTimeout) {
+			clearTimeout(reloadTimeout);
+			reloadTimeout = null;
 		}
 		loadNetworkData();
 	}
@@ -146,6 +167,7 @@
 	const mode = $derived($dataSourceStore.mode);
 	const selectedStart = $derived($dataSourceStore.selectedStart);
 	const selectedEnd = $derived($dataSourceStore.selectedEnd);
+	const canSwitchToHistorical = $derived(mode === 'historical' || hasValidDataRange());
 </script>
 
 <div class="space-y-3">
@@ -154,10 +176,13 @@
 		<span class="text-sm font-medium">Data Source</span>
 		<button
 			onclick={toggleMode}
+			disabled={mode === 'live' && !canSwitchToHistorical}
 			class="flex items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors
 				{mode === 'live'
 				? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
-				: 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30'}"
+				: 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30'}
+				disabled:opacity-40 disabled:cursor-not-allowed"
+			title={!canSwitchToHistorical && mode === 'live' ? 'No stored data yet - wait for poller to collect data' : ''}
 		>
 			{#if mode === 'live'}
 				<Radio class="h-4 w-4" />
@@ -243,13 +268,18 @@
 	{#if pollerStatus}
 		<div class="space-y-1 text-xs text-muted-foreground">
 			<div class="flex justify-between">
-				<span>Stored Logs:</span>
-				<span class="font-mono">{pollerStatus.database?.tableCounts?.flow_logs_current?.toLocaleString() || 0}</span>
+				<span>Stored Records:</span>
+				<span class="font-mono">{(pollerStatus.database?.dataRange?.count ?? pollerStatus.database?.tableCounts?.flow_logs_current ?? 0).toLocaleString()}</span>
 			</div>
-			{#if pollerStatus.lastPollTime}
+			{#if pollerStatus.lastPollTime && new Date(pollerStatus.lastPollTime).getFullYear() > 1970}
 				<div class="flex justify-between">
 					<span>Last Poll:</span>
 					<span class="font-mono">{formatDate(pollerStatus.lastPollTime)}</span>
+				</div>
+			{:else if pollerStatus.pollErrors > 0}
+				<div class="flex justify-between">
+					<span>Last Poll:</span>
+					<span class="font-mono text-destructive">Failed ({pollerStatus.pollErrors} errors)</span>
 				</div>
 			{/if}
 			<div class="flex justify-between">

@@ -15,17 +15,49 @@ export const TIME_RANGES: TimeRange[] = [
 	{ label: 'Custom', value: 'custom' }
 ];
 
-// Default filter state
+// LocalStorage key for persisted filter preferences
+const FILTER_STORAGE_KEY = 'tsflow-filter-prefs';
+
+function loadPersistedFilters(): Partial<FilterState> {
+	if (typeof window === 'undefined') return {};
+	try {
+		const stored = localStorage.getItem(FILTER_STORAGE_KEY);
+		if (!stored) return {};
+		const parsed = JSON.parse(stored);
+		// Only restore preferences that make sense to persist
+		return {
+			trafficTypes: Array.isArray(parsed.trafficTypes) ? parsed.trafficTypes : [],
+			showIpv4: parsed.showIpv4 ?? true,
+			showIpv6: parsed.showIpv6 ?? true
+		};
+	} catch {
+		return {};
+	}
+}
+
+function persistFilters(state: FilterState) {
+	if (typeof window === 'undefined') return;
+	try {
+		localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify({
+			trafficTypes: state.trafficTypes,
+			showIpv4: state.showIpv4,
+			showIpv6: state.showIpv6
+		}));
+	} catch { /* quota exceeded or private browsing */ }
+}
+
+// Default filter state — virtual + subnet shown by default
 const defaultFilterState: FilterState = {
 	search: '',
 	protocols: [],
-	trafficTypes: [],
+	trafficTypes: ['virtual', 'subnet'],
 	minBandwidth: 0,
 	maxBandwidth: 1000000000, // 1GB
 	minConnections: 0,
 	showIpv4: true,
 	showIpv6: true,
-	selectedTags: []
+	selectedTags: [],
+	...loadPersistedFilters()
 };
 
 // Debounce delay for search filtering (ms)
@@ -62,19 +94,35 @@ function createFilterStore() {
 					? s.protocols.filter((p) => p !== protocol)
 					: [...s.protocols, protocol]
 			})),
-		setTrafficTypes: (trafficTypes: TrafficType[]) => update((s) => ({ ...s, trafficTypes })),
+		setTrafficTypes: (trafficTypes: TrafficType[]) => update((s) => {
+			const next = { ...s, trafficTypes };
+			persistFilters(next);
+			return next;
+		}),
 		toggleTrafficType: (type: TrafficType) =>
-			update((s) => ({
-				...s,
-				trafficTypes: s.trafficTypes.includes(type)
-					? s.trafficTypes.filter((t) => t !== type)
-					: [...s.trafficTypes, type]
-			})),
+			update((s) => {
+				const next = {
+					...s,
+					trafficTypes: s.trafficTypes.includes(type)
+						? s.trafficTypes.filter((t) => t !== type)
+						: [...s.trafficTypes, type]
+				};
+				persistFilters(next);
+				return next;
+			}),
 		setBandwidthRange: (min: number, max: number) =>
 			update((s) => ({ ...s, minBandwidth: min, maxBandwidth: max })),
 		setMinConnections: (min: number) => update((s) => ({ ...s, minConnections: min })),
-		toggleIpv4: () => update((s) => ({ ...s, showIpv4: !s.showIpv4 })),
-		toggleIpv6: () => update((s) => ({ ...s, showIpv6: !s.showIpv6 })),
+		toggleIpv4: () => update((s) => {
+			const next = { ...s, showIpv4: !s.showIpv4 };
+			persistFilters(next);
+			return next;
+		}),
+		toggleIpv6: () => update((s) => {
+			const next = { ...s, showIpv6: !s.showIpv6 };
+			persistFilters(next);
+			return next;
+		}),
 		setSelectedTags: (tags: string[]) => update((s) => ({ ...s, selectedTags: tags })),
 		reset: () => {
 			set(defaultFilterState);

@@ -79,7 +79,7 @@
 </script>
 
 <div
-	class="min-w-[180px] w-fit rounded-lg border-2 bg-card shadow-lg transition-all duration-200"
+	class="min-w-[180px] w-fit rounded-lg border-2 bg-card shadow-lg transition-all duration-200 dark:shadow-lg shadow-md shadow-black/10"
 	class:opacity-25={isDimmed}
 	class:grayscale={isDimmed}
 	class:ring-2={isHighlighted && $hasSelection}
@@ -89,7 +89,7 @@
 	<Handle type="target" position={Position.Top} class="!opacity-0" />
 
 	<!-- Header -->
-	<div class="rounded-t-md px-3 py-2" style="background: color-mix(in srgb, {nodeColor} 15%, transparent)">
+	<div class="rounded-t-md px-3 py-2" style="background: color-mix(in srgb, {nodeColor} 15%, var(--color-card))">
 		<div class="flex items-start justify-between gap-3">
 			<div class="flex items-center gap-2 min-w-0">
 				{#if iconType === 'vip'}

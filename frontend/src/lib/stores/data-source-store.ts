@@ -63,7 +63,9 @@ function createDataSourceStore() {
 				update((s) => ({ ...s, pollerStatus }));
 				return pollerStatus;
 			} catch (err) {
+				const error = err instanceof Error ? err.message : 'Failed to fetch poller status';
 				console.error('Failed to fetch poller status:', err);
+				update((s) => ({ ...s, error }));
 				return null;
 			}
 		},

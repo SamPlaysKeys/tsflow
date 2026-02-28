@@ -1,8 +1,9 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { dataSourceStore } from '$lib/stores/data-source-store';
-	import { uiStore, filteredNodes, timeRangeStore, TIME_RANGES } from '$lib/stores';
+	import { uiStore, filteredNodes, filterStore, timeRangeStore, TIME_RANGES, lastUpdated } from '$lib/stores';
 	import { tailscaleService, type BandwidthBucket } from '$lib/services';
-	import { formatBytes } from '$lib/utils';
+	import { formatBytes, formatBytesRate } from '$lib/utils';
 
 	// Chart dimensions
 	const height = 80;
@@ -12,9 +13,14 @@
 	let containerWidth = $state(800);
 	let container: HTMLDivElement;
 
-	// Chart data from API
+	// Chart data from API (normalized to bytes/sec for display)
 	let chartData = $state<{ time: Date; txBytes: number; rxBytes: number }[]>([]);
+	// Raw totals (un-normalized bytes) for header summary
+	let rawTotals = $state<{ tx: number; rx: number }>({ tx: 0, rx: 0 });
+	let bucketSeconds = $state(60); // Duration of each bucket, from API metadata
 	let isLoading = $state(false);
+	let usingStoredFallback = $state(false); // True when live mode fell back to stored data
+	let bandwidthController: AbortController | null = null;
 
 	// Get selected node and its device ID for bandwidth queries
 	const selectedNode = $derived.by(() => {
@@ -38,6 +44,12 @@
 	// Selected node name for display
 	const selectedNodeName = $derived(selectedNode?.displayName || null);
 
+	// Check if traffic type filters are active (not showing all types)
+	const ALL_TRAFFIC_TYPES = ['virtual', 'subnet', 'exit', 'physical'] as const;
+	const hasActiveTrafficFilter = $derived(
+		$filterStore.trafficTypes.length > 0 && $filterStore.trafficTypes.length < ALL_TRAFFIC_TYPES.length
+	);
+
 	$effect(() => {
 		if (container) {
 			const observer = new ResizeObserver((entries) => {
@@ -50,6 +62,8 @@
 
 	// Get current time range for live mode - use store values when available
 	const liveTimeRange = $derived.by(() => {
+		// Re-evaluate when network data refreshes so new Date() is fresh
+		void $lastUpdated;
 		// First check if store has values (set by other components)
 		const storeStart = $dataSourceStore.selectedStart;
 		const storeEnd = $dataSourceStore.selectedEnd;
@@ -68,35 +82,97 @@
 		return { start, end };
 	});
 
-	// Fetch bandwidth data when data range, mode, time range, or selected node changes
-	$effect(() => {
-		const dataRange = $dataSourceStore.dataRange;
-		const mode = $dataSourceStore.mode;
-		const deviceId = selectedDeviceId;
-
-		if (dataRange?.earliest && dataRange?.latest) {
-			// Always fetch full available range (same behavior for live and historical)
-			fetchBandwidth(new Date(dataRange.earliest), new Date(dataRange.latest), deviceId);
+	// Ensure data range is loaded when the chart mounts
+	onMount(() => {
+		if (!$dataSourceStore.dataRange) {
+			dataSourceStore.fetchDataRange();
 		}
 	});
 
-	async function fetchBandwidth(start: Date, end: Date, nodeId: string | null) {
+	// Fetch bandwidth data when mode, time range, or selected node changes
+	$effect(() => {
+		const mode = $dataSourceStore.mode;
+		const dataRange = $dataSourceStore.dataRange;
+		const deviceId = selectedDeviceId;
+
+		if (mode === 'historical') {
+			// Historical mode: fetch full stored range (selection highlight shows subset)
+			const hasValidRange = dataRange?.earliest && dataRange?.latest
+				&& dataRange.count > 0
+				&& new Date(dataRange.earliest).getFullYear() > 1970;
+			if (hasValidRange) {
+				fetchBandwidth(new Date(dataRange.earliest), new Date(dataRange.latest), deviceId);
+			}
+		} else {
+			// Live mode: fetch current time window, fall back to stored range if empty
+			const { start, end } = liveTimeRange;
+			fetchBandwidthWithFallback(start, end, deviceId, dataRange);
+		}
+	});
+
+	async function fetchBandwidthWithFallback(
+		start: Date, end: Date,
+		nodeId: string | null,
+		dataRange: { earliest: string; latest: string; count: number } | null
+	) {
+		usingStoredFallback = false;
+		const data = await fetchBandwidth(start, end, nodeId);
+		if (data === null) return; // aborted or errored — newer request in flight
+		if (data.length > 0) return;
+
+		// Live mode returned empty — fall back to stored data range
+		let range = dataRange;
+		if (!range || range.count === 0) {
+			range = await dataSourceStore.fetchDataRange();
+		}
+		if (range && range.count > 0) {
+			const rangeStart = new Date(range.earliest);
+			const rangeEnd = new Date(range.latest);
+			if (rangeStart.getFullYear() > 1970 && rangeEnd > rangeStart) {
+				await fetchBandwidth(rangeStart, rangeEnd, nodeId);
+				usingStoredFallback = true;
+			}
+		}
+	}
+
+	async function fetchBandwidth(start: Date, end: Date, nodeId: string | null): Promise<typeof chartData | null> {
+		// Cancel previous in-flight request
+		if (bandwidthController) {
+			bandwidthController.abort();
+		}
+		bandwidthController = new AbortController();
+		const signal = bandwidthController.signal;
+
 		isLoading = true;
 		try {
-			// Let backend decide optimal bucket size based on time range
-			const response = await tailscaleService.getBandwidth(start, end, nodeId || undefined);
-			chartData = (response.buckets || [])
+			const response = await tailscaleService.getBandwidth(start, end, nodeId || undefined, signal);
+			if (signal.aborted) return null;
+			const bs = Math.max(response.metadata?.bucketSeconds || 60, 1);
+			bucketSeconds = bs;
+			// Compute raw totals before normalization
+			const buckets = response.buckets || [];
+			rawTotals = buckets.reduce(
+				(acc, b) => ({ tx: acc.tx + b.txBytes, rx: acc.rx + b.rxBytes }),
+				{ tx: 0, rx: 0 }
+			);
+			// Normalize to bytes/sec for chart display
+			chartData = buckets
 				.map((b) => ({
 					time: new Date(b.time),
-					txBytes: b.txBytes,
-					rxBytes: b.rxBytes
+					txBytes: b.txBytes / bs,
+					rxBytes: b.rxBytes / bs
 				}))
 				.sort((a, b) => a.time.getTime() - b.time.getTime());
+			return chartData;
 		} catch (err) {
+			if (signal.aborted) return null;
 			console.error('Failed to fetch bandwidth:', err);
 			chartData = [];
+			return null;
 		} finally {
-			isLoading = false;
+			if (!signal.aborted) {
+				isLoading = false;
+			}
 		}
 	}
 
@@ -169,16 +245,17 @@
 
 	// Selected range indicator (for both live and historical modes)
 	const selectedRangeX = $derived.by(() => {
+		// No selection highlight when showing stored fallback data
+		if (usingStoredFallback) return null;
+
 		const mode = $dataSourceStore.mode;
 		let rangeStart: Date | null = null;
 		let rangeEnd: Date | null = null;
 
 		if (mode === 'live') {
-			// In live mode, use the live time range as the selection
 			rangeStart = liveTimeRange.start;
 			rangeEnd = liveTimeRange.end;
 		} else {
-			// In historical mode, use the selected range from store
 			rangeStart = $dataSourceStore.selectedStart;
 			rangeEnd = $dataSourceStore.selectedEnd;
 		}
@@ -205,46 +282,42 @@
 		return time.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 	}
 
-	// Calculate full totals (all chart data)
-	const fullTotals = $derived.by(() => {
-		const tx = chartData.reduce((sum, d) => sum + d.txBytes, 0);
-		const rx = chartData.reduce((sum, d) => sum + d.rxBytes, 0);
-		return { tx, rx, total: tx + rx };
-	});
+	// Full totals use raw (un-normalized) byte counts for volume summary
+	const fullTotals = $derived({ tx: rawTotals.tx, rx: rawTotals.rx, total: rawTotals.tx + rawTotals.rx });
 
-	// Calculate totals for selected range (both live and historical modes)
+	// Calculate totals for selected range (raw bytes, un-normalized)
 	const totals = $derived.by(() => {
+		// When using stored fallback, the live time range doesn't overlap — show full totals
+		if (usingStoredFallback) return fullTotals;
+
 		const mode = $dataSourceStore.mode;
 		let rangeStart: Date | null = null;
 		let rangeEnd: Date | null = null;
 
 		if (mode === 'live') {
-			// In live mode, use the live time range
 			rangeStart = liveTimeRange.start;
 			rangeEnd = liveTimeRange.end;
 		} else {
-			// In historical mode, use the selected range from store
 			rangeStart = $dataSourceStore.selectedStart;
 			rangeEnd = $dataSourceStore.selectedEnd;
 		}
 
-		// Sum data within selected range
+		// Sum data within selected range (convert back from rate to raw bytes)
 		if (rangeStart && rangeEnd) {
 			const dataToSum = chartData.filter((d) => {
 				const t = d.time.getTime();
 				return t >= rangeStart!.getTime() && t <= rangeEnd!.getTime();
 			});
-			const tx = dataToSum.reduce((sum, d) => sum + d.txBytes, 0);
-			const rx = dataToSum.reduce((sum, d) => sum + d.rxBytes, 0);
+			const tx = dataToSum.reduce((sum, d) => sum + d.txBytes * bucketSeconds, 0);
+			const rx = dataToSum.reduce((sum, d) => sum + d.rxBytes * bucketSeconds, 0);
 			return { tx, rx, total: tx + rx };
 		}
 
-		// Otherwise use full totals
 		return fullTotals;
 	});
 
 	// Check if we're showing a subset of data
-	const isShowingSubset = $derived(totals.total !== fullTotals.total);
+	const isShowingSubset = $derived(!usingStoredFallback && totals.total !== fullTotals.total);
 
 	// Generate time axis ticks
 	const timeAxisTicks = $derived.by(() => {
@@ -264,17 +337,57 @@
 		return ticks;
 	});
 
-	// Y-axis ticks
+	// Y-axis ticks (values are bytes/sec since chartData is normalized)
 	const yAxisTicks = $derived.by(() => {
 		const { maxBytes } = chartBounds;
-		return [0, maxBytes / 2, maxBytes].map((bytes) => ({
-			y: scaleY(bytes),
-			label: formatBytes(bytes)
+		return [0, maxBytes / 2, maxBytes].map((bytesPerSec) => ({
+			y: scaleY(bytesPerSec),
+			label: formatBytesRate(bytesPerSec)
 		}));
+	});
+
+	// Hover state for tooltip
+	let hoverIndex = $state<number | null>(null);
+
+	function handleChartMouseMove(e: MouseEvent) {
+		if (chartData.length === 0) return;
+		const svg = e.currentTarget as SVGElement;
+		const rect = svg.getBoundingClientRect();
+		const mouseX = e.clientX - rect.left;
+
+		// Find closest data point by x position
+		let closestIdx = 0;
+		let closestDist = Infinity;
+		for (let i = 0; i < chartData.length; i++) {
+			const x = scaleX(chartData[i].time.getTime());
+			const dist = Math.abs(x - mouseX);
+			if (dist < closestDist) {
+				closestDist = dist;
+				closestIdx = i;
+			}
+		}
+		hoverIndex = closestDist < 50 ? closestIdx : null;
+	}
+
+	function handleChartMouseLeave() {
+		hoverIndex = null;
+	}
+
+	const hoverData = $derived.by(() => {
+		if (hoverIndex === null || !chartData[hoverIndex]) return null;
+		const d = chartData[hoverIndex];
+		return {
+			x: scaleX(d.time.getTime()),
+			time: d.time,
+			txRate: d.txBytes,
+			rxRate: d.rxBytes,
+			txRaw: d.txBytes * bucketSeconds,
+			rxRaw: d.rxBytes * bucketSeconds
+		};
 	});
 </script>
 
-<div bind:this={container} class="w-full bg-card border-b border-border">
+<div bind:this={container} class="relative w-full bg-card border-b border-border">
 	<div class="flex items-center justify-between px-3 py-1.5">
 		<div class="flex items-center gap-4">
 			<span class="text-xs font-medium text-muted-foreground">
@@ -283,7 +396,11 @@
 				{:else}
 					Network Throughput
 				{/if}
-				{#if $dataSourceStore.mode === 'live'}
+				{#if usingStoredFallback}
+					<span class="text-amber-500/80" title="Live data unavailable, showing most recent stored data">
+						(stored data)
+					</span>
+				{:else if $dataSourceStore.mode === 'live'}
 					<span class="text-primary/70">
 						({$timeRangeStore.selected})
 					</span>
@@ -321,11 +438,18 @@
 				{/if}
 			</div>
 		</div>
-		{#if chartData.length > 0}
-			<span class="text-xs text-muted-foreground">
-				{chartData.length} data points
-			</span>
-		{/if}
+		<div class="flex items-center gap-2">
+			{#if hasActiveTrafficFilter}
+				<span class="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-500" title="Bandwidth chart shows all traffic types regardless of graph filters">
+					all types
+				</span>
+			{/if}
+			{#if chartData.length > 0}
+				<span class="text-xs text-muted-foreground">
+					{chartData.length} pts
+				</span>
+			{/if}
+		</div>
 	</div>
 
 	{#if isLoading}
@@ -333,7 +457,14 @@
 			Loading bandwidth data...
 		</div>
 	{:else if chartData.length > 0}
-		<svg width={containerWidth} {height} class="overflow-visible">
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<svg
+			width={containerWidth}
+			{height}
+			class="overflow-visible"
+			onmousemove={handleChartMouseMove}
+			onmouseleave={handleChartMouseLeave}
+		>
 			<!-- Grid lines -->
 			<g class="text-border">
 				{#each yAxisTicks as tick}
@@ -351,11 +482,8 @@
 
 			{#if selectedNodeName}
 				<!-- Per-node view: show both TX and RX lines -->
-				<!-- RX area (behind) -->
 				<path d={rxArea} fill="rgb(16, 185, 129)" fill-opacity="0.15" />
 				<path d={rxPath} fill="none" stroke="rgb(16, 185, 129)" stroke-width="1.5" />
-
-				<!-- TX area (front) -->
 				<path d={txArea} fill="rgb(59, 130, 246)" fill-opacity="0.15" />
 				<path d={txPath} fill="none" stroke="rgb(59, 130, 246)" stroke-width="1.5" />
 			{:else}
@@ -364,7 +492,7 @@
 				<path d={txPath} fill="none" stroke="rgb(59, 130, 246)" stroke-width="1.5" />
 			{/if}
 
-			<!-- Selected range indicator (historical mode) -->
+			<!-- Selected range indicator -->
 			{#if selectedRangeX !== null}
 				{@const startX = Math.max(padding.left, selectedRangeX.start)}
 				{@const endX = Math.min(containerWidth - padding.right, selectedRangeX.end)}
@@ -379,6 +507,36 @@
 						stroke="rgb(59, 130, 246)"
 						stroke-width="2"
 						stroke-opacity="0.6"
+					/>
+				{/if}
+			{/if}
+
+			<!-- Hover crosshair + tooltip -->
+			{#if hoverData}
+				<line
+					x1={hoverData.x}
+					y1={padding.top}
+					x2={hoverData.x}
+					y2={padding.top + chartHeight}
+					stroke="currentColor"
+					stroke-opacity="0.4"
+					stroke-width="1"
+					class="text-foreground"
+				/>
+				<!-- TX dot -->
+				<circle
+					cx={hoverData.x}
+					cy={scaleY(hoverData.txRate)}
+					r="3"
+					fill="rgb(59, 130, 246)"
+				/>
+				{#if selectedNodeName}
+					<!-- RX dot -->
+					<circle
+						cx={hoverData.x}
+						cy={scaleY(hoverData.rxRate)}
+						r="3"
+						fill="rgb(16, 185, 129)"
 					/>
 				{/if}
 			{/if}
@@ -408,9 +566,42 @@
 				</text>
 			{/each}
 		</svg>
+
+		<!-- Hover tooltip (floats above chart content) -->
+		{#if hoverData}
+			{@const tooltipX = Math.min(Math.max(hoverData.x, 80), containerWidth - 80)}
+			<div
+				class="pointer-events-none absolute z-10 -translate-x-1/2 whitespace-nowrap rounded border border-border bg-popover/95 px-2 py-1 text-[10px] shadow-md backdrop-blur-sm"
+				style="left: {tooltipX}px; top: 30px;"
+			>
+				<div class="text-muted-foreground">{formatTime(hoverData.time)}</div>
+				{#if selectedNodeName}
+					<div class="flex items-center gap-1.5">
+						<span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span>
+						TX: {formatBytesRate(hoverData.txRate)}
+						<span class="text-muted-foreground/60">({formatBytes(hoverData.txRaw)})</span>
+					</div>
+					<div class="flex items-center gap-1.5">
+						<span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+						RX: {formatBytesRate(hoverData.rxRate)}
+						<span class="text-muted-foreground/60">({formatBytes(hoverData.rxRaw)})</span>
+					</div>
+				{:else}
+					<div class="flex items-center gap-1.5">
+						<span class="h-1.5 w-1.5 rounded-full bg-blue-500"></span>
+						{formatBytesRate(hoverData.txRate)}
+						<span class="text-muted-foreground/60">({formatBytes(hoverData.txRaw)})</span>
+					</div>
+				{/if}
+			</div>
+		{/if}
 	{:else}
 		<div class="flex items-center justify-center text-xs text-muted-foreground" style="height: {height}px">
-			No bandwidth data available
+			{#if selectedNode?.isVIPService}
+				VIP service — per-service bandwidth tracking not yet available
+			{:else}
+				No bandwidth data available
+			{/if}
 		</div>
 	{/if}
 </div>

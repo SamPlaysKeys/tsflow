@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { uiStore, filteredNodes, rawLogs } from '$lib/stores';
+	import { uiStore, filteredNodes, rawLogs, devices } from '$lib/stores';
 	import { formatBytes, extractIP, extractPort, getProtocolName } from '$lib/utils';
 	import type { NetworkLog } from '$lib/types';
 
@@ -13,6 +13,23 @@
 
 	function getPortName(port: number): string {
 		return PORT_NAMES[port] || (port > 0 ? `Port ${port}` : 'Unknown');
+	}
+
+	// Build device ID to primary IP mapping (for resolving aggregated flow addresses)
+	const deviceIdToIP = $derived.by(() => {
+		const map = new Map<string, string>();
+		for (const device of $devices) {
+			if (device.addresses.length > 0) {
+				map.set(device.id, device.addresses[0]);
+			}
+		}
+		return map;
+	});
+
+	// Resolve address (IP:port or device ID) to IP
+	function resolveToNodeIP(address: string): string {
+		const ip = extractIP(address);
+		return deviceIdToIP.get(ip) || ip;
 	}
 
 	const selectedNode = $derived.by(() => {
@@ -33,41 +50,47 @@
 	const portData = $derived.by(() => {
 		if (!selectedNode) return { stats: [], totalCount: 0 };
 
-		const nodeIPs = new Set(selectedNode.ips);
+		const nodeIPs = new Set(selectedNode.ips || []);
 		const portMap = new Map<string, PortStat>();
 
 		$rawLogs.forEach((log: NetworkLog) => {
 			const allTraffic = [
 				...(log.virtualTraffic || []),
+				...(log.exitTraffic || []),
 				...(log.subnetTraffic || [])
 			];
 
 			allTraffic.forEach((t) => {
-				const srcIP = extractIP(t.src);
-				const dstIP = extractIP(t.dst);
+				const srcIP = resolveToNodeIP(t.src);
+				const dstIP = resolveToNodeIP(t.dst);
 				const dstPort = extractPort(t.dst) || 0;
 				const proto = getProtocolName(t.proto || 0);
 
-				if (nodeIPs.has(srcIP) || nodeIPs.has(dstIP)) {
-					if (dstPort === 0) return;
+				// TX-only: attribute txBytes based on whether the selected node is
+				// the sender (src) or receiver (dst) in this flow entry
+				const nodeIsSrc = nodeIPs.has(srcIP);
+				const nodeIsDst = nodeIPs.has(dstIP);
+				if (!nodeIsSrc && !nodeIsDst) return;
+				if (dstPort === 0) return;
 
-					const key = `${dstPort}-${proto}`;
-					const existing = portMap.get(key);
+				const key = `${dstPort}-${proto}`;
+				const existing = portMap.get(key);
+				const txAdd = nodeIsSrc ? (t.txBytes || 0) : 0;
+				const rxAdd = nodeIsDst ? (t.txBytes || 0) : 0;
 
-					if (existing) {
-						existing.txBytes += t.txBytes || 0;
-						existing.rxBytes += t.rxBytes || 0;
-						existing.connections += 1;
-					} else {
-						portMap.set(key, {
-							port: dstPort,
-							name: getPortName(dstPort),
-							protocol: proto,
-							txBytes: t.txBytes || 0,
-							rxBytes: t.rxBytes || 0,
-							connections: 1
-						});
-					}
+				if (existing) {
+					existing.txBytes += txAdd;
+					existing.rxBytes += rxAdd;
+					existing.connections += 1;
+				} else {
+					portMap.set(key, {
+						port: dstPort,
+						name: getPortName(dstPort),
+						protocol: proto,
+						txBytes: txAdd,
+						rxBytes: rxAdd,
+						connections: 1
+					});
 				}
 			});
 		});
@@ -87,23 +110,27 @@
 	const totalTraffic = $derived.by(() => {
 		if (!selectedNode) return { tx: 0, rx: 0, total: 0 };
 
-		const nodeIPs = new Set(selectedNode.ips);
+		const nodeIPs = new Set(selectedNode.ips || []);
 		let tx = 0;
 		let rx = 0;
 
 		$rawLogs.forEach((log: NetworkLog) => {
 			const allTraffic = [
 				...(log.virtualTraffic || []),
+				...(log.exitTraffic || []),
 				...(log.subnetTraffic || [])
 			];
 
 			allTraffic.forEach((t) => {
-				const srcIP = extractIP(t.src);
-				const dstIP = extractIP(t.dst);
+				const srcIP = resolveToNodeIP(t.src);
+				const dstIP = resolveToNodeIP(t.dst);
 
-				if (nodeIPs.has(srcIP) || nodeIPs.has(dstIP)) {
+				// TX-only: selected node's TX = txBytes when node is src
+				// Selected node's RX = txBytes when node is dst
+				if (nodeIPs.has(srcIP)) {
 					tx += t.txBytes || 0;
-					rx += t.rxBytes || 0;
+				} else if (nodeIPs.has(dstIP)) {
+					rx += t.txBytes || 0;
 				}
 			});
 		});

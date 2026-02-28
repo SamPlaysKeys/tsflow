@@ -2,15 +2,12 @@ package services
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"log"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/rajsinghtech/tsflow/backend/internal/database"
-	tailscale "tailscale.com/client/tailscale/v2"
 )
 
 // PollerConfig holds configuration for the background poller
@@ -44,333 +41,27 @@ func DefaultPollerConfig() PollerConfig {
 	}
 }
 
-// DeviceCache maps IPs to device info for fast lookups
-type DeviceCache struct {
-	mu          sync.RWMutex
-	ipToDevice  map[string]*DeviceCacheEntry
-	idToDevice  map[string]*DeviceCacheEntry
-	lastRefresh time.Time
-}
-
-type DeviceCacheEntry struct {
-	ID          string
-	Name        string
-	Hostname    string
-	IPs         []string
-	IsTailscale bool
-}
-
-func NewDeviceCache() *DeviceCache {
-	return &DeviceCache{
-		ipToDevice: make(map[string]*DeviceCacheEntry),
-		idToDevice: make(map[string]*DeviceCacheEntry),
-	}
-}
-
-func (c *DeviceCache) Update(devices []Device) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.ipToDevice = make(map[string]*DeviceCacheEntry)
-	c.idToDevice = make(map[string]*DeviceCacheEntry)
-
-	for _, d := range devices {
-		entry := &DeviceCacheEntry{
-			ID:          d.ID,
-			Name:        d.Name,
-			Hostname:    d.Hostname,
-			IPs:         d.Addresses,
-			IsTailscale: true,
-		}
-		c.idToDevice[d.ID] = entry
-		for _, ip := range d.Addresses {
-			c.ipToDevice[ip] = entry
-		}
-	}
-	c.lastRefresh = time.Now()
-}
-
-// ResolveIP returns the device ID for an IP, or the IP itself if not found
-func (c *DeviceCache) ResolveIP(ip string) string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if entry, ok := c.ipToDevice[ip]; ok {
-		return entry.ID
-	}
-	return ip // Return IP as-is for external addresses
-}
-
-// GetDevice returns device info by ID
-func (c *DeviceCache) GetDevice(id string) *DeviceCacheEntry {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.idToDevice[id]
-}
-
-// NeedsRefresh returns true if cache is stale
-func (c *DeviceCache) NeedsRefresh(maxAge time.Duration) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return time.Since(c.lastRefresh) > maxAge
-}
-
-// RollingWindowCache provides fast in-memory access to recent aggregates
-// This enables instant responses for live view queries without DB access
-type RollingWindowCache struct {
-	mu sync.RWMutex
-
-	// Node pair aggregates by minute bucket
-	nodePairs map[int64][]database.NodePairAggregate
-
-	// Total bandwidth by minute bucket
-	bandwidth map[int64]*database.BandwidthBucket
-
-	// Per-node bandwidth by (bucket, nodeID)
-	nodeBandwidth map[int64]map[string]*database.NodeBandwidth
-
-	// Network-wide traffic stats by minute bucket
-	trafficStats map[int64]*database.TrafficStats
-
-	// Maximum age of cached data (default 1 hour)
-	maxAge time.Duration
-}
-
-func NewRollingWindowCache(maxAge time.Duration) *RollingWindowCache {
-	return &RollingWindowCache{
-		nodePairs:     make(map[int64][]database.NodePairAggregate),
-		bandwidth:     make(map[int64]*database.BandwidthBucket),
-		nodeBandwidth: make(map[int64]map[string]*database.NodeBandwidth),
-		trafficStats:  make(map[int64]*database.TrafficStats),
-		maxAge:        maxAge,
-	}
-}
-
-// Update adds new aggregates to the cache and prunes old data
-func (c *RollingWindowCache) Update(
-	nodePairs []database.NodePairAggregate,
-	bandwidth []database.BandwidthBucket,
-	nodeBandwidth []database.NodeBandwidth,
-	trafficStats []database.TrafficStats,
-) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Add node pairs by bucket
-	for _, np := range nodePairs {
-		c.nodePairs[np.Bucket] = append(c.nodePairs[np.Bucket], np)
-	}
-
-	// Add bandwidth by bucket
-	for _, b := range bandwidth {
-		bucket := b.Time.Unix()
-		if existing, ok := c.bandwidth[bucket]; ok {
-			existing.TxBytes += b.TxBytes
-			existing.RxBytes += b.RxBytes
-		} else {
-			c.bandwidth[bucket] = &database.BandwidthBucket{
-				Time:    b.Time,
-				TxBytes: b.TxBytes,
-				RxBytes: b.RxBytes,
-			}
-		}
-	}
-
-	// Add node bandwidth by bucket and node
-	for _, nb := range nodeBandwidth {
-		if c.nodeBandwidth[nb.Bucket] == nil {
-			c.nodeBandwidth[nb.Bucket] = make(map[string]*database.NodeBandwidth)
-		}
-		nodeMap := c.nodeBandwidth[nb.Bucket]
-		if existing, ok := nodeMap[nb.NodeID]; ok {
-			existing.TxBytes += nb.TxBytes
-			existing.RxBytes += nb.RxBytes
-		} else {
-			nodeMap[nb.NodeID] = &database.NodeBandwidth{
-				Bucket:  nb.Bucket,
-				NodeID:  nb.NodeID,
-				TxBytes: nb.TxBytes,
-				RxBytes: nb.RxBytes,
-			}
-		}
-	}
-
-	// Add traffic stats by bucket (additive for byte/flow counters, replace for uniquePairs/topPorts)
-	for _, ts := range trafficStats {
-		if existing, ok := c.trafficStats[ts.Bucket]; ok {
-			existing.TCPBytes += ts.TCPBytes
-			existing.UDPBytes += ts.UDPBytes
-			existing.OtherProtoBytes += ts.OtherProtoBytes
-			existing.VirtualBytes += ts.VirtualBytes
-			existing.SubnetBytes += ts.SubnetBytes
-			existing.PhysicalBytes += ts.PhysicalBytes
-			existing.TotalFlows += ts.TotalFlows
-			existing.UniquePairs = ts.UniquePairs // replace: latest snapshot
-			existing.TopPorts = ts.TopPorts       // replace: latest snapshot
-		} else {
-			copied := ts
-			c.trafficStats[ts.Bucket] = &copied
-		}
-	}
-
-	// Prune old data
-	c.prune()
-}
-
-// prune removes data older than maxAge
-func (c *RollingWindowCache) prune() {
-	cutoff := time.Now().Add(-c.maxAge).Unix()
-
-	for bucket := range c.nodePairs {
-		if bucket < cutoff {
-			delete(c.nodePairs, bucket)
-		}
-	}
-
-	for bucket := range c.bandwidth {
-		if bucket < cutoff {
-			delete(c.bandwidth, bucket)
-		}
-	}
-
-	for bucket := range c.nodeBandwidth {
-		if bucket < cutoff {
-			delete(c.nodeBandwidth, bucket)
-		}
-	}
-
-	for bucket := range c.trafficStats {
-		if bucket < cutoff {
-			delete(c.trafficStats, bucket)
-		}
-	}
-}
-
-// GetNodePairs returns cached node pair aggregates for a time range
-func (c *RollingWindowCache) GetNodePairs(start, end time.Time) []database.NodePairAggregate {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	startUnix := start.Unix()
-	endUnix := end.Unix()
-	var result []database.NodePairAggregate
-
-	for bucket, pairs := range c.nodePairs {
-		if bucket >= startUnix && bucket <= endUnix {
-			result = append(result, pairs...)
-		}
-	}
-
-	return result
-}
-
-// GetBandwidth returns cached bandwidth for a time range (sorted by time)
-func (c *RollingWindowCache) GetBandwidth(start, end time.Time) []database.BandwidthBucket {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	startUnix := start.Unix()
-	endUnix := end.Unix()
-	var result []database.BandwidthBucket
-
-	for bucket, bw := range c.bandwidth {
-		if bucket >= startUnix && bucket <= endUnix {
-			result = append(result, *bw)
-		}
-	}
-
-	// Sort by time ascending
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Time.Before(result[j].Time)
-	})
-
-	return result
-}
-
-// GetNodeBandwidth returns cached bandwidth for a specific node (sorted by time)
-func (c *RollingWindowCache) GetNodeBandwidth(start, end time.Time, nodeID string) []database.BandwidthBucket {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	startUnix := start.Unix()
-	endUnix := end.Unix()
-	var result []database.BandwidthBucket
-
-	for bucket, nodeMap := range c.nodeBandwidth {
-		if bucket >= startUnix && bucket <= endUnix {
-			if nb, ok := nodeMap[nodeID]; ok {
-				result = append(result, database.BandwidthBucket{
-					Time:    time.Unix(bucket, 0).UTC(),
-					TxBytes: nb.TxBytes,
-					RxBytes: nb.RxBytes,
-				})
-			}
-		}
-	}
-
-	// Sort by time ascending
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Time.Before(result[j].Time)
-	})
-
-	return result
-}
-
-// GetTrafficStats returns cached traffic stats for a time range (sorted by bucket)
-func (c *RollingWindowCache) GetTrafficStats(start, end time.Time) []database.TrafficStats {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	startUnix := start.Unix()
-	endUnix := end.Unix()
-	var result []database.TrafficStats
-
-	for bucket, ts := range c.trafficStats {
-		if bucket >= startUnix && bucket <= endUnix {
-			result = append(result, *ts)
-		}
-	}
-
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Bucket < result[j].Bucket
-	})
-
-	return result
-}
-
-// HasDataFor returns true if the cache has data for the given time range
-func (c *RollingWindowCache) HasDataFor(start, end time.Time) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	// Check if we have any data at all
-	if len(c.bandwidth) == 0 && len(c.nodePairs) == 0 {
-		return false
-	}
-
-	// Check if the range is within our cache window
-	cacheStart := time.Now().Add(-c.maxAge)
-	return start.After(cacheStart) || start.Equal(cacheStart)
-}
-
 // Poller fetches network logs from Tailscale API and stores them in the database
 type Poller struct {
-	tsService      *TailscaleService
-	store          database.Store
-	config         PollerConfig
-	deviceCache    *DeviceCache
-	rollingCache   *RollingWindowCache
+	tsService    *TailscaleService
+	store        database.Store
+	config       PollerConfig
+	deviceCache  *DeviceCache
+	rollingCache *RollingWindowCache
 
-	mu       sync.RWMutex
-	running  bool
-	stopChan chan struct{}
-	doneChan chan struct{}
+	mu          sync.RWMutex
+	running     bool
+	stopChan    chan struct{}
+	doneChan    chan struct{}
+	triggerChan chan struct{}
 
 	// Stats
 	lastPollTime       time.Time
 	lastPollCount      int
 	totalPolled        int64
 	pollErrors         int64
+	lastPollError      string
+	lastPollErrorTime  time.Time
 	cacheRefreshErrors int64
 }
 
@@ -384,6 +75,7 @@ func NewPoller(tsService *TailscaleService, store database.Store, config PollerC
 		rollingCache: NewRollingWindowCache(time.Hour), // Keep 1 hour in memory
 		stopChan:     make(chan struct{}),
 		doneChan:     make(chan struct{}),
+		triggerChan:  make(chan struct{}, 1),
 	}
 }
 
@@ -398,6 +90,7 @@ func (p *Poller) Start(ctx context.Context) error {
 	// Re-initialize channels for restart support (they're nil after Stop())
 	p.stopChan = make(chan struct{})
 	p.doneChan = make(chan struct{})
+	p.triggerChan = make(chan struct{}, 1)
 	p.mu.Unlock()
 
 	log.Printf("Starting background poller (interval: %v, retention minutely: %v, hourly: %v)",
@@ -408,12 +101,8 @@ func (p *Poller) Start(ctx context.Context) error {
 		log.Printf("Warning: initial device cache refresh failed: %v", err)
 	}
 
-	// Initial poll
-	if err := p.poll(ctx); err != nil {
-		log.Printf("Initial poll failed: %v", err)
-	}
-
-	// Start background goroutine
+	// Start background goroutine (initial poll happens asynchronously
+	// so the server can start accepting requests immediately)
 	go p.run(ctx)
 
 	return nil
@@ -446,7 +135,7 @@ func (p *Poller) Stats() map[string]any {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	return map[string]any{
+	stats := map[string]any{
 		"running":       p.running,
 		"lastPollTime":  p.lastPollTime,
 		"lastPollCount": p.lastPollCount,
@@ -454,6 +143,11 @@ func (p *Poller) Stats() map[string]any {
 		"pollErrors":    p.pollErrors,
 		"pollInterval":  p.config.PollInterval.String(),
 	}
+	if p.lastPollError != "" {
+		stats["lastError"] = p.lastPollError
+		stats["lastErrorTime"] = p.lastPollErrorTime
+	}
+	return stats
 }
 
 // GetDeviceCache returns the device cache for external use
@@ -466,6 +160,15 @@ func (p *Poller) GetRollingCache() *RollingWindowCache {
 	return p.rollingCache
 }
 
+// TriggerPoll signals the background loop to poll immediately.
+// Non-blocking: if a trigger is already pending, this is a no-op.
+func (p *Poller) TriggerPoll() {
+	select {
+	case p.triggerChan <- struct{}{}:
+	default:
+	}
+}
+
 func (p *Poller) run(ctx context.Context) {
 	// Capture channels at start to avoid race with Stop() setting them to nil
 	p.mu.RLock()
@@ -474,6 +177,21 @@ func (p *Poller) run(ctx context.Context) {
 	p.mu.RUnlock()
 
 	defer close(doneChan)
+
+	// Run cleanup before initial poll to purge any stale raw flow logs from prior runs
+	if err := p.cleanup(ctx); err != nil {
+		log.Printf("Pre-poll cleanup failed: %v", err)
+	}
+
+	// Initial poll (runs asynchronously so the server isn't blocked)
+	if err := p.poll(ctx); err != nil {
+		log.Printf("Initial poll failed: %v", err)
+		p.mu.Lock()
+		p.pollErrors++
+		p.lastPollError = err.Error()
+		p.lastPollErrorTime = time.Now()
+		p.mu.Unlock()
+	}
 
 	pollTicker := time.NewTicker(p.config.PollInterval)
 	defer pollTicker.Stop()
@@ -487,6 +205,21 @@ func (p *Poller) run(ctx context.Context) {
 			return
 		case <-stopChan:
 			return
+		case <-p.triggerChan:
+			// Manual trigger — same logic as scheduled poll
+			if p.deviceCache.NeedsRefresh(p.config.DeviceCacheRefresh) {
+				if err := p.refreshDeviceCache(ctx); err != nil {
+					log.Printf("Warning: device cache refresh failed: %v", err)
+				}
+			}
+			if err := p.poll(ctx); err != nil {
+				log.Printf("Triggered poll failed: %v", err)
+				p.mu.Lock()
+				p.pollErrors++
+				p.lastPollError = err.Error()
+				p.lastPollErrorTime = time.Now()
+				p.mu.Unlock()
+			}
 		case <-pollTicker.C:
 			// Refresh device cache if stale
 			if p.deviceCache.NeedsRefresh(p.config.DeviceCacheRefresh) {
@@ -502,6 +235,8 @@ func (p *Poller) run(ctx context.Context) {
 				log.Printf("Poll failed: %v", err)
 				p.mu.Lock()
 				p.pollErrors++
+				p.lastPollError = err.Error()
+				p.lastPollErrorTime = time.Now()
 				p.mu.Unlock()
 			}
 		case <-cleanupTicker.C:
@@ -522,6 +257,10 @@ func (p *Poller) refreshDeviceCache(_ context.Context) error {
 	return nil
 }
 
+// maxPollChunk is the maximum time range for a single API call.
+// Larger ranges are split into sequential chunks to avoid HTTP timeouts.
+const maxPollChunk = 30 * time.Minute
+
 func (p *Poller) poll(ctx context.Context) error {
 	// Get last poll state
 	pollState, err := p.store.GetPollState(ctx)
@@ -538,11 +277,60 @@ func (p *Poller) poll(ctx context.Context) error {
 		log.Printf("First poll, backfilling from %v", start)
 	} else {
 		// Continue from exactly where we left off - no overlap
-		// The additive upsert logic in the database causes double-counting
-		// if we re-fetch any data, so we must start exactly at LastPollEnd
 		start = pollState.LastPollEnd
 	}
 
+	// If the time range is larger than maxPollChunk, split into chunks
+	// to avoid HTTP timeouts on large API responses.
+	if end.Sub(start) > maxPollChunk {
+		return p.pollChunked(ctx, start, end)
+	}
+
+	return p.pollRange(ctx, start, end)
+}
+
+// pollChunked splits a large time range into sequential chunks, committing
+// each chunk independently so that progress is saved on partial failure.
+func (p *Poller) pollChunked(ctx context.Context, start, end time.Time) error {
+	totalRange := end.Sub(start)
+	numChunks := int(totalRange/maxPollChunk) + 1
+	log.Printf("Large time range (%v), splitting into %d chunks of %v", totalRange.Round(time.Second), numChunks, maxPollChunk)
+
+	cursor := start
+	chunksCompleted := 0
+	for cursor.Before(end) {
+		chunkEnd := cursor.Add(maxPollChunk)
+		if chunkEnd.After(end) {
+			chunkEnd = end
+		}
+
+		if err := p.pollRange(ctx, cursor, chunkEnd); err != nil {
+			log.Printf("Chunk %d/%d failed (%v to %v): %v — stopping backfill, will resume next poll",
+				chunksCompleted+1, numChunks,
+				cursor.Format(time.RFC3339), chunkEnd.Format(time.RFC3339), err)
+			// Return nil so the poller doesn't count this as a full failure;
+			// progress up to the last successful chunk is already committed.
+			return nil
+		}
+
+		chunksCompleted++
+		cursor = chunkEnd
+
+		// Check for cancellation between chunks
+		select {
+		case <-ctx.Done():
+			log.Printf("Backfill interrupted after %d/%d chunks", chunksCompleted, numChunks)
+			return nil
+		default:
+		}
+	}
+
+	log.Printf("Backfill complete: %d chunks processed", chunksCompleted)
+	return nil
+}
+
+// pollRange fetches and commits logs for a single time range.
+func (p *Poller) pollRange(ctx context.Context, start, end time.Time) error {
 	// Fetch logs from Tailscale API
 	logsResp, err := p.tsService.GetNetworkLogs(
 		start.Format(time.RFC3339),
@@ -559,47 +347,33 @@ func (p *Poller) poll(ctx context.Context) error {
 		return p.store.UpdatePollState(ctx, end)
 	}
 
-	// Insert raw flow logs (temporary storage)
-	insertedCount, err := p.store.InsertFlowLogs(ctx, flowLogs)
-	if err != nil {
-		return err
+	// Only insert raw flow logs for recent data (within last 15 minutes).
+	// During backfill, raw logs are never queried and just bloat the database.
+	insertedCount := len(flowLogs)
+	isRecent := time.Since(end) < 15*time.Minute
+	if isRecent {
+		insertedCount, err = p.store.InsertFlowLogs(ctx, flowLogs)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Pre-aggregate at poll time: node pairs, bandwidth, and traffic stats
 	nodePairs, totalBandwidth, nodeBandwidth, trafficStats := p.aggregate(flowLogs)
 
-	// Store aggregates
-	if len(nodePairs) > 0 {
-		if err := p.store.UpsertNodePairAggregates(ctx, nodePairs); err != nil {
-			log.Printf("Warning: failed to upsert node pairs: %v", err)
-		}
-	}
-
-	if len(totalBandwidth) > 0 {
-		if err := p.store.UpsertBandwidth(ctx, totalBandwidth, 60); err != nil {
-			log.Printf("Warning: failed to upsert bandwidth: %v", err)
-		}
-	}
-
-	if len(nodeBandwidth) > 0 {
-		if err := p.store.UpsertNodeBandwidth(ctx, nodeBandwidth, 60); err != nil {
-			log.Printf("Warning: failed to upsert node bandwidth: %v", err)
-		}
-	}
-
-	if len(trafficStats) > 0 {
-		if err := p.store.UpsertTrafficStats(ctx, trafficStats); err != nil {
-			log.Printf("Warning: failed to upsert traffic stats: %v", err)
-		}
+	// Atomically commit all aggregates + poll state in a single transaction.
+	if err := p.store.CommitPollResults(ctx, database.PollResults{
+		NodePairs:     nodePairs,
+		Bandwidth:     totalBandwidth,
+		NodeBandwidth: nodeBandwidth,
+		TrafficStats:  trafficStats,
+		PollEnd:       end,
+	}); err != nil {
+		return fmt.Errorf("failed to commit poll results: %w", err)
 	}
 
 	// Update rolling cache for fast live view queries
 	p.rollingCache.Update(nodePairs, totalBandwidth, nodeBandwidth, trafficStats)
-
-	// Update poll state
-	if err := p.store.UpdatePollState(ctx, end); err != nil {
-		return err
-	}
 
 	// Update stats
 	p.mu.Lock()
@@ -617,300 +391,6 @@ func (p *Poller) poll(ctx context.Context) error {
 	return nil
 }
 
-// aggregate creates pre-computed aggregates from flow logs
-// Handles deduplication: Tailscale logs the same traffic from both endpoints
-// (A→B logged by A, B→A logged by B). We normalize pairs by sorting node IDs
-// and use TX-only for bandwidth since RX duplicates the reverse direction's TX.
-func (p *Poller) aggregate(logs []database.FlowLog) (
-	[]database.NodePairAggregate,
-	[]database.BandwidthBucket,
-	[]database.NodeBandwidth,
-	[]database.TrafficStats,
-) {
-	// Node pair aggregation: group by (bucket, nodeA, nodeB, trafficType)
-	// where nodeA < nodeB (normalized ordering)
-	type nodePairKey struct {
-		bucket      int64
-		nodeA       string // always the lexicographically smaller ID
-		nodeB       string // always the lexicographically larger ID
-		trafficType string
-	}
-	nodePairMap := make(map[nodePairKey]*database.NodePairAggregate)
-
-	// Protocol/port tracking per node pair
-	type protoPortKey struct {
-		proto int
-		port  int
-	}
-	type pairProtoData struct {
-		protocols map[int]int64          // proto number -> total bytes
-		ports     map[protoPortKey]int64 // (proto, port) -> total bytes
-	}
-	pairProtoMap := make(map[nodePairKey]*pairProtoData)
-
-	// Network-wide traffic stats accumulator per bucket
-	type trafficStatsAccum struct {
-		tcpBytes        int64
-		udpBytes        int64
-		otherProtoBytes int64
-		virtualBytes    int64
-		subnetBytes     int64
-		physicalBytes   int64
-		totalFlows      int64
-		uniquePairs     map[string]struct{} // "nodeA|nodeB" -> exists
-		ports           map[protoPortKey]int64
-	}
-	trafficStatsMap := make(map[int64]*trafficStatsAccum)
-
-	// Total bandwidth: group by bucket (TX-only to avoid double counting)
-	bandwidthMap := make(map[int64]*database.BandwidthBucket)
-
-	// Per-node bandwidth: group by (bucket, nodeID)
-	type nodeBwKey struct {
-		bucket int64
-		nodeID string
-	}
-	nodeBwMap := make(map[nodeBwKey]*database.NodeBandwidth)
-
-	bucketSize := int64(60) // 1-minute buckets
-
-	for _, log := range logs {
-		// Calculate bucket
-		bucket := (log.LoggedAt.Unix() / bucketSize) * bucketSize
-
-		// Resolve IPs to device IDs
-		srcNodeID := p.deviceCache.ResolveIP(log.SrcIP)
-		dstNodeID := p.deviceCache.ResolveIP(log.DstIP)
-
-		// Normalize node pair: smaller ID is always nodeA
-		// This merges A→B and B→A into a single bidirectional record
-		var nodeA, nodeB string
-		var isReverse bool
-		if srcNodeID < dstNodeID {
-			nodeA, nodeB = srcNodeID, dstNodeID
-			isReverse = false
-		} else {
-			nodeA, nodeB = dstNodeID, srcNodeID
-			isReverse = true
-		}
-
-		// Node pair aggregate with normalized key
-		npKey := nodePairKey{
-			bucket:      bucket,
-			nodeA:       nodeA,
-			nodeB:       nodeB,
-			trafficType: log.TrafficType,
-		}
-
-		if agg, ok := nodePairMap[npKey]; ok {
-			if isReverse {
-				// This log is B→A, so TX goes to RxBytes (traffic from B to A)
-				agg.RxBytes += log.TxBytes
-				agg.RxPkts += log.TxPkts
-			} else {
-				// This log is A→B, so TX goes to TxBytes (traffic from A to B)
-				agg.TxBytes += log.TxBytes
-				agg.TxPkts += log.TxPkts
-			}
-			agg.FlowCount++
-		} else {
-			agg := &database.NodePairAggregate{
-				Bucket:      bucket,
-				SrcNodeID:   nodeA, // nodeA is always "src" in normalized form
-				DstNodeID:   nodeB, // nodeB is always "dst" in normalized form
-				TrafficType: log.TrafficType,
-				FlowCount:   1,
-				Protocols:   "[]",
-				Ports:       "[]",
-			}
-			if isReverse {
-				agg.RxBytes = log.TxBytes
-				agg.RxPkts = log.TxPkts
-			} else {
-				agg.TxBytes = log.TxBytes
-				agg.TxPkts = log.TxPkts
-			}
-			nodePairMap[npKey] = agg
-		}
-
-		// Track protocols/ports for this node pair
-		ppData, ok := pairProtoMap[npKey]
-		if !ok {
-			ppData = &pairProtoData{
-				protocols: make(map[int]int64),
-				ports:     make(map[protoPortKey]int64),
-			}
-			pairProtoMap[npKey] = ppData
-		}
-		ppData.protocols[log.Protocol] += log.TxBytes
-		if log.DstPort > 0 {
-			ppData.ports[protoPortKey{proto: log.Protocol, port: log.DstPort}] += log.TxBytes
-		}
-
-		// Accumulate network-wide traffic stats
-		tsAccum, ok := trafficStatsMap[bucket]
-		if !ok {
-			tsAccum = &trafficStatsAccum{
-				uniquePairs: make(map[string]struct{}),
-				ports:       make(map[protoPortKey]int64),
-			}
-			trafficStatsMap[bucket] = tsAccum
-		}
-		switch log.Protocol {
-		case 6:
-			tsAccum.tcpBytes += log.TxBytes
-		case 17:
-			tsAccum.udpBytes += log.TxBytes
-		default:
-			tsAccum.otherProtoBytes += log.TxBytes
-		}
-		switch log.TrafficType {
-		case "virtual":
-			tsAccum.virtualBytes += log.TxBytes
-		case "subnet":
-			tsAccum.subnetBytes += log.TxBytes
-		case "physical":
-			tsAccum.physicalBytes += log.TxBytes
-		}
-		tsAccum.totalFlows++
-		tsAccum.uniquePairs[nodeA+"|"+nodeB] = struct{}{}
-		if log.DstPort > 0 {
-			tsAccum.ports[protoPortKey{proto: log.Protocol, port: log.DstPort}] += log.TxBytes
-		}
-
-		// Total bandwidth: TX-only (avoids double counting)
-		// Each byte is transmitted once, so sum of all TX = total traffic
-		if bw, ok := bandwidthMap[bucket]; ok {
-			bw.TxBytes += log.TxBytes
-		} else {
-			bandwidthMap[bucket] = &database.BandwidthBucket{
-				Time:    time.Unix(bucket, 0).UTC(),
-				TxBytes: log.TxBytes,
-				RxBytes: 0, // Not used - would duplicate TX
-			}
-		}
-
-		// Per-node bandwidth: TX-only approach
-		// srcNode's TX = what it sent
-		// dstNode's RX = what it received = srcNode's TX
-		srcBwKey := nodeBwKey{bucket: bucket, nodeID: srcNodeID}
-		if bw, ok := nodeBwMap[srcBwKey]; ok {
-			bw.TxBytes += log.TxBytes
-		} else {
-			nodeBwMap[srcBwKey] = &database.NodeBandwidth{
-				Bucket:  bucket,
-				NodeID:  srcNodeID,
-				TxBytes: log.TxBytes,
-				RxBytes: 0,
-			}
-		}
-
-		// dstNode receives what srcNode transmitted
-		dstBwKey := nodeBwKey{bucket: bucket, nodeID: dstNodeID}
-		if bw, ok := nodeBwMap[dstBwKey]; ok {
-			bw.RxBytes += log.TxBytes // dst receives what src sent
-		} else {
-			nodeBwMap[dstBwKey] = &database.NodeBandwidth{
-				Bucket:  bucket,
-				NodeID:  dstNodeID,
-				TxBytes: 0,
-				RxBytes: log.TxBytes, // dst receives what src sent
-			}
-		}
-	}
-
-	// Serialize protocol/port data into node pair aggregates
-	for key, agg := range nodePairMap {
-		if ppData, ok := pairProtoMap[key]; ok {
-			// Protocols: sorted list of unique protocol numbers
-			protos := make([]int, 0, len(ppData.protocols))
-			for p := range ppData.protocols {
-				protos = append(protos, p)
-			}
-			sort.Ints(protos)
-			if b, err := json.Marshal(protos); err == nil {
-				agg.Protocols = string(b)
-			}
-
-			// Ports: top 20 by bytes as [{port, proto, bytes}, ...]
-			type portEntry struct {
-				Port  int   `json:"port"`
-				Proto int   `json:"proto"`
-				Bytes int64 `json:"bytes"`
-			}
-			portEntries := make([]portEntry, 0, len(ppData.ports))
-			for ppk, bytes := range ppData.ports {
-				portEntries = append(portEntries, portEntry{Port: ppk.port, Proto: ppk.proto, Bytes: bytes})
-			}
-			sort.Slice(portEntries, func(i, j int) bool {
-				return portEntries[i].Bytes > portEntries[j].Bytes
-			})
-			if len(portEntries) > 20 {
-				portEntries = portEntries[:20]
-			}
-			if b, err := json.Marshal(portEntries); err == nil {
-				agg.Ports = string(b)
-			}
-		}
-	}
-
-	// Build TrafficStats from accumulated data
-	trafficStats := make([]database.TrafficStats, 0, len(trafficStatsMap))
-	for bucket, accum := range trafficStatsMap {
-		// Top 20 ports by bytes
-		type portEntry struct {
-			Port  int   `json:"port"`
-			Proto int   `json:"proto"`
-			Bytes int64 `json:"bytes"`
-		}
-		portEntries := make([]portEntry, 0, len(accum.ports))
-		for ppk, bytes := range accum.ports {
-			portEntries = append(portEntries, portEntry{Port: ppk.port, Proto: ppk.proto, Bytes: bytes})
-		}
-		sort.Slice(portEntries, func(i, j int) bool {
-			return portEntries[i].Bytes > portEntries[j].Bytes
-		})
-		if len(portEntries) > 20 {
-			portEntries = portEntries[:20]
-		}
-		topPortsJSON := "[]"
-		if b, err := json.Marshal(portEntries); err == nil {
-			topPortsJSON = string(b)
-		}
-
-		trafficStats = append(trafficStats, database.TrafficStats{
-			Bucket:          bucket,
-			TCPBytes:        accum.tcpBytes,
-			UDPBytes:        accum.udpBytes,
-			OtherProtoBytes: accum.otherProtoBytes,
-			VirtualBytes:    accum.virtualBytes,
-			SubnetBytes:     accum.subnetBytes,
-			PhysicalBytes:   accum.physicalBytes,
-			TotalFlows:      accum.totalFlows,
-			UniquePairs:     int64(len(accum.uniquePairs)),
-			TopPorts:        topPortsJSON,
-		})
-	}
-
-	// Convert maps to slices
-	nodePairs := make([]database.NodePairAggregate, 0, len(nodePairMap))
-	for _, agg := range nodePairMap {
-		nodePairs = append(nodePairs, *agg)
-	}
-
-	totalBandwidth := make([]database.BandwidthBucket, 0, len(bandwidthMap))
-	for _, bw := range bandwidthMap {
-		totalBandwidth = append(totalBandwidth, *bw)
-	}
-
-	nodeBandwidth := make([]database.NodeBandwidth, 0, len(nodeBwMap))
-	for _, bw := range nodeBwMap {
-		nodeBandwidth = append(nodeBandwidth, *bw)
-	}
-
-	return nodePairs, totalBandwidth, nodeBandwidth, trafficStats
-}
-
 func (p *Poller) cleanup(ctx context.Context) error {
 	deleted, err := p.store.Cleanup(ctx,
 		p.config.RetentionMinutely,
@@ -925,221 +405,3 @@ func (p *Poller) cleanup(ctx context.Context) error {
 	}
 	return nil
 }
-
-// convertLogs converts Tailscale API response to database FlowLog entries
-func (p *Poller) convertLogs(logsResp any) []database.FlowLog {
-	var flowLogs []database.FlowLog
-
-	logsMap, ok := logsResp.(map[string]any)
-	if !ok {
-		return flowLogs
-	}
-
-	logs, ok := logsMap["logs"]
-	if !ok {
-		return flowLogs
-	}
-
-	// Handle []tailscale.NetworkFlowLog
-	if tsLogs, ok := logs.([]tailscale.NetworkFlowLog); ok {
-		for _, tsLog := range tsLogs {
-			flowLogs = append(flowLogs, p.convertTailscaleLog(tsLog)...)
-		}
-		return flowLogs
-	}
-
-	// Handle []any (generic JSON)
-	if logsArray, ok := logs.([]any); ok {
-		for _, logItem := range logsArray {
-			if logMap, ok := logItem.(map[string]any); ok {
-				flowLogs = append(flowLogs, p.convertMapLog(logMap)...)
-			}
-		}
-	}
-
-	return flowLogs
-}
-
-func (p *Poller) convertTailscaleLog(tsLog tailscale.NetworkFlowLog) []database.FlowLog {
-	var flowLogs []database.FlowLog
-
-	// Process virtual traffic
-	for _, traffic := range tsLog.VirtualTraffic {
-		flowLogs = append(flowLogs, database.FlowLog{
-			LoggedAt:    tsLog.Logged,
-			NodeID:      tsLog.NodeID,
-			TrafficType: "virtual",
-			Protocol:    traffic.Proto,
-			SrcIP:       extractIP(traffic.Src),
-			SrcPort:     extractPort(traffic.Src),
-			DstIP:       extractIP(traffic.Dst),
-			DstPort:     extractPort(traffic.Dst),
-			TxBytes:     int64(traffic.TxBytes),
-			RxBytes:     int64(traffic.RxBytes),
-			TxPkts:      int64(traffic.TxPkts),
-			RxPkts:      int64(traffic.RxPkts),
-		})
-	}
-
-	// Process subnet traffic
-	for _, traffic := range tsLog.SubnetTraffic {
-		flowLogs = append(flowLogs, database.FlowLog{
-			LoggedAt:    tsLog.Logged,
-			NodeID:      tsLog.NodeID,
-			TrafficType: "subnet",
-			Protocol:    traffic.Proto,
-			SrcIP:       extractIP(traffic.Src),
-			SrcPort:     extractPort(traffic.Src),
-			DstIP:       extractIP(traffic.Dst),
-			DstPort:     extractPort(traffic.Dst),
-			TxBytes:     int64(traffic.TxBytes),
-			RxBytes:     int64(traffic.RxBytes),
-			TxPkts:      int64(traffic.TxPkts),
-			RxPkts:      int64(traffic.RxPkts),
-		})
-	}
-
-	// Process physical traffic
-	for _, traffic := range tsLog.PhysicalTraffic {
-		flowLogs = append(flowLogs, database.FlowLog{
-			LoggedAt:    tsLog.Logged,
-			NodeID:      tsLog.NodeID,
-			TrafficType: "physical",
-			Protocol:    traffic.Proto,
-			SrcIP:       extractIP(traffic.Src),
-			SrcPort:     extractPort(traffic.Src),
-			DstIP:       extractIP(traffic.Dst),
-			DstPort:     extractPort(traffic.Dst),
-			TxBytes:     int64(traffic.TxBytes),
-			RxBytes:     0,
-			TxPkts:      int64(traffic.TxPkts),
-			RxPkts:      0,
-		})
-	}
-
-	return flowLogs
-}
-
-func (p *Poller) convertMapLog(logMap map[string]any) []database.FlowLog {
-	var flowLogs []database.FlowLog
-
-	nodeID, ok := logMap["nodeId"].(string)
-	if !ok {
-		log.Printf("Warning: skipping log entry with invalid nodeId type: %T", logMap["nodeId"])
-		return flowLogs
-	}
-	logged, err := time.Parse(time.RFC3339, getString(logMap, "logged"))
-	if err != nil {
-		log.Printf("Warning: skipping log entry with invalid logged timestamp for node %s", nodeID)
-		return flowLogs
-	}
-
-	// Process each traffic type
-	for _, trafficType := range []string{"virtualTraffic", "subnetTraffic", "physicalTraffic"} {
-		if traffic, ok := logMap[trafficType].([]any); ok {
-			typeName := strings.TrimSuffix(trafficType, "Traffic")
-			for _, t := range traffic {
-				if tMap, ok := t.(map[string]any); ok {
-					flowLogs = append(flowLogs, database.FlowLog{
-						LoggedAt:    logged,
-						NodeID:      nodeID,
-						TrafficType: typeName,
-						Protocol:    getInt(tMap, "proto"),
-						SrcIP:       extractIP(getString(tMap, "src")),
-						SrcPort:     extractPort(getString(tMap, "src")),
-						DstIP:       extractIP(getString(tMap, "dst")),
-						DstPort:     extractPort(getString(tMap, "dst")),
-						TxBytes:     getInt64(tMap, "txBytes"),
-						RxBytes:     getInt64(tMap, "rxBytes"),
-						TxPkts:      getInt64(tMap, "txPkts"),
-						RxPkts:      getInt64(tMap, "rxPkts"),
-					})
-				}
-			}
-		}
-	}
-
-	return flowLogs
-}
-
-// Helper functions
-func extractIP(addr string) string {
-	// Handle IPv6 with brackets: [::1]:443
-	if strings.HasPrefix(addr, "[") {
-		end := strings.Index(addr, "]")
-		if end > 0 {
-			return addr[1:end]
-		}
-	}
-	// Handle IPv4: 192.168.1.1:443
-	if idx := strings.LastIndex(addr, ":"); idx > 0 {
-		return addr[:idx]
-	}
-	return addr
-}
-
-func extractPort(addr string) int {
-	// Handle IPv6 with brackets: [::1]:443
-	if strings.HasPrefix(addr, "[") {
-		end := strings.Index(addr, "]:")
-		if end > 0 {
-			var port int
-			_, _ = parsePort(addr[end+2:], &port)
-			return port
-		}
-		return 0
-	}
-	// Handle IPv4: 192.168.1.1:443
-	if idx := strings.LastIndex(addr, ":"); idx > 0 {
-		var port int
-		_, _ = parsePort(addr[idx+1:], &port)
-		return port
-	}
-	return 0
-}
-
-func parsePort(s string, port *int) (bool, error) {
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false, nil
-		}
-		*port = *port*10 + int(c-'0')
-		// Prevent overflow and validate port range
-		if *port > 65535 {
-			*port = 0
-			return false, nil
-		}
-	}
-	return *port > 0 && *port <= 65535, nil
-}
-
-func getString(m map[string]any, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
-func getInt(m map[string]any, key string) int {
-	if v, ok := m[key].(float64); ok {
-		// Validate float is within int range and not NaN/Inf
-		if v != v || v > float64(int(^uint(0)>>1)) || v < float64(-int(^uint(0)>>1)-1) {
-			return 0
-		}
-		return int(v)
-	}
-	return 0
-}
-
-func getInt64(m map[string]any, key string) int64 {
-	if v, ok := m[key].(float64); ok {
-		// Validate float is within int64 range and not NaN/Inf
-		// Note: float64 can't exactly represent all int64 values, but this catches major issues
-		if v != v || v > float64(1<<63-1) || v < float64(-1<<63) {
-			return 0
-		}
-		return int64(v)
-	}
-	return 0
-}
-

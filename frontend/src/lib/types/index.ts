@@ -34,6 +34,7 @@ export interface NetworkLog {
 	start: string;
 	end: string;
 	virtualTraffic: TrafficEntry[];
+	exitTraffic?: TrafficEntry[];
 	subnetTraffic: TrafficEntry[];
 	physicalTraffic: TrafficEntry[];
 }

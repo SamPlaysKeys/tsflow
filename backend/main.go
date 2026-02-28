@@ -135,6 +135,8 @@ func main() {
 		router = gin.Default()
 	}
 
+	router.HandleMethodNotAllowed = true
+
 	// Add gzip compression middleware
 	router.Use(gzip.Gzip(gzip.DefaultCompression))
 
@@ -162,6 +164,7 @@ func main() {
 	router.GET("/health", handlerService.HealthCheck)
 
 	api := router.Group("/api")
+	api.Use(middleware.RateLimitMiddleware(middleware.DefaultRateLimitConfig()))
 	{
 		// Existing endpoints (live API queries) - short cache
 		liveCache := middleware.CacheMiddleware(middleware.ShortCacheConfig())
@@ -224,7 +227,11 @@ func main() {
 
 	// Log authentication method being used
 	if cfg.TailscaleOAuthClientID != "" && cfg.TailscaleOAuthClientSecret != "" {
-		log.Printf("Authentication: OAuth Client Credentials (Client ID: %s)", cfg.TailscaleOAuthClientID)
+		maskedID := cfg.TailscaleOAuthClientID
+		if len(maskedID) > 4 {
+			maskedID = "****" + maskedID[len(maskedID)-4:]
+		}
+		log.Printf("Authentication: OAuth Client Credentials (Client ID: %s)", maskedID)
 	} else {
 		log.Printf("Authentication: API Key")
 	}

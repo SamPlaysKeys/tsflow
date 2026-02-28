@@ -1,14 +1,10 @@
 <script lang="ts">
-	import { Search, X, RefreshCw, ChevronDown } from 'lucide-svelte';
-	import { onMount } from 'svelte';
-	import { filterStore, loadNetworkData, dataSourceStore } from '$lib/stores';
+	import { Search, X, ChevronDown } from 'lucide-svelte';
+	import { filterStore, dataSourceStore } from '$lib/stores';
 	import type { TrafficType } from '$lib/types';
 	import TimelineSlider from '$lib/components/timeline/TimelineSlider.svelte';
 
-	// Local state
-	let isRefreshing = $state(false);
-
-	// Traffic type options with exit added
+	// Traffic type options including exit node traffic
 	const trafficTypes: { value: TrafficType; label: string; defaultOn: boolean }[] = [
 		{ value: 'virtual', label: 'Virtual', defaultOn: true },
 		{ value: 'exit', label: 'Exit Node', defaultOn: false },
@@ -16,19 +12,8 @@
 		{ value: 'physical', label: 'Physical', defaultOn: false }
 	];
 
-	// Initialize with defaults (virtual and subnet ON, others OFF)
-	let selectedTrafficTypes = $state<Set<string>>(new Set(['virtual', 'subnet']));
-
-	// Initialize filter store with defaults once on mount
-	onMount(() => {
-		filterStore.setTrafficTypes([...selectedTrafficTypes] as TrafficType[]);
-	});
-
-	async function handleRefresh() {
-		isRefreshing = true;
-		await loadNetworkData();
-		isRefreshing = false;
-	}
+	// Initialize from filter store (defaults set in filter-store.ts, overridden by localStorage)
+	let selectedTrafficTypes = $state<Set<string>>(new Set($filterStore.trafficTypes));
 
 	function toggleTrafficType(type: string) {
 		if (selectedTrafficTypes.has(type)) {
@@ -103,16 +88,6 @@
 			<li>• Regular text searches device names, IPs, and tags</li>
 		</ul>
 	</div>
-
-	<!-- Refresh Button -->
-	<button
-		onclick={handleRefresh}
-		disabled={isRefreshing}
-		class="mb-4 flex w-full items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-	>
-		<RefreshCw class="h-4 w-4 {isRefreshing ? 'animate-spin' : ''}" />
-		Refresh Data
-	</button>
 
 	<!-- Traffic Type -->
 	<fieldset class="mb-4">

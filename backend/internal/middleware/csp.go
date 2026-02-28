@@ -15,19 +15,8 @@ func CSPMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		nonce, err := generateNonce()
 		if err != nil {
-			log.Printf("WARNING: failed to generate CSP nonce: %v", err)
-			// Fall back to CSP without nonce
-			csp := "default-src 'self'; " +
-				"base-uri 'self'; " +
-				"object-src 'none'; " +
-				"frame-ancestors 'none'; " +
-				"form-action 'self'; " +
-				"img-src 'self' data: https:; " +
-				"font-src 'self' https://fonts.gstatic.com; " +
-				"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-				"script-src 'self'"
-			c.Header("Content-Security-Policy", csp)
-			c.Next()
+			log.Printf("ERROR: failed to generate CSP nonce: %v", err)
+			c.AbortWithStatus(500)
 			return
 		}
 

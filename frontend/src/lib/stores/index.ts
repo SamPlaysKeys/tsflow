@@ -19,12 +19,20 @@ export {
 	filteredEdges,
 	primaryMatchedNodes,
 	networkStats,
+	lastUpdated,
+	isAutoRefreshing,
 	loadNetworkData,
+	retryLoadNetworkData,
+	retryCount,
+	retryingIn,
 	startAutoRefresh,
 	stopAutoRefresh
 } from './network-store';
 export {
 	loadStats,
+	retryLoadStats,
+	statsRetryCount,
+	statsRetryingIn,
 	startStatsRefresh,
 	stopStatsRefresh,
 	statsSummary,
