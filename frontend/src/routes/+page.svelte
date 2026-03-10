@@ -37,11 +37,7 @@
 		} else if (e.key === 'r' && !e.metaKey && !e.ctrlKey) {
 			loadNetworkData();
 		} else if (e.key === 'f' && !e.metaKey && !e.ctrlKey) {
-			if (window.innerWidth >= 1024) {
-				uiStore.toggleFilterPanel();
-			} else {
-				uiStore.toggleMobileDrawer();
-			}
+			uiStore.toggleFilters();
 		} else if (e.key === 'l' && !e.metaKey && !e.ctrlKey) {
 			uiStore.toggleLogViewer();
 		}

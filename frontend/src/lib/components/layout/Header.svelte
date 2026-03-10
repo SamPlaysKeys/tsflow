@@ -79,11 +79,7 @@
 	}
 
 	function handleFilterToggle() {
-		if (window.innerWidth >= 1024) {
-			uiStore.toggleFilterPanel();
-		} else {
-			uiStore.toggleMobileDrawer();
-		}
+		uiStore.toggleFilters();
 	}
 
 	const ThemeIcon = $derived(getThemeIcon($themeStore));

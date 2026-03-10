@@ -22,6 +22,14 @@ function createUIStore() {
 		openMobileDrawer: () => update((s) => ({ ...s, mobileDrawerOpen: true })),
 		closeMobileDrawer: () => update((s) => ({ ...s, mobileDrawerOpen: false })),
 		toggleMobileDrawer: () => update((s) => ({ ...s, mobileDrawerOpen: !s.mobileDrawerOpen })),
+		// Unified filter toggle: uses desktop sidebar on lg+, mobile drawer below
+		toggleFilters: () => {
+			if (typeof window !== 'undefined' && window.innerWidth >= 1024) {
+				update((s) => ({ ...s, showFilterPanel: !s.showFilterPanel }));
+			} else {
+				update((s) => ({ ...s, mobileDrawerOpen: !s.mobileDrawerOpen }));
+			}
+		},
 		selectNode: (nodeId: string | null) =>
 			update((s) => ({ ...s, selectedNodeId: nodeId, selectedEdgeId: null })),
 		selectEdge: (edgeId: string | null) =>

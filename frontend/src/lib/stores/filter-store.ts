@@ -24,12 +24,18 @@ function loadPersistedFilters(): Partial<FilterState> {
 		const stored = localStorage.getItem(FILTER_STORAGE_KEY);
 		if (!stored) return {};
 		const parsed = JSON.parse(stored);
-		// Only restore preferences that make sense to persist
-		return {
-			trafficTypes: Array.isArray(parsed.trafficTypes) ? parsed.trafficTypes : [],
+		// Only restore preferences that make sense to persist.
+		// For trafficTypes: only override defaults if the stored value is a non-empty array.
+		// An empty array means all types were deselected — restore defaults instead
+		// so users don't get stuck with a permanently blank graph after reload.
+		const result: Partial<FilterState> = {
 			showIpv4: parsed.showIpv4 ?? true,
 			showIpv6: parsed.showIpv6 ?? true
 		};
+		if (Array.isArray(parsed.trafficTypes) && parsed.trafficTypes.length > 0) {
+			result.trafficTypes = parsed.trafficTypes;
+		}
+		return result;
 	} catch {
 		return {};
 	}

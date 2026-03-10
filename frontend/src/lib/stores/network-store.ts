@@ -28,8 +28,8 @@ export const processedNetwork = derived(
 // Uses debouncedFilterStore to avoid re-running expensive graph filtering on every keystroke
 const trafficFilteredEdges = derived([processedNetwork, debouncedFilterStore], ([$network, $filters]) => {
 	return $network.links.filter((link) => {
-		// Traffic type filter — only show selected types. Empty = nothing shown.
-		if ($filters.trafficTypes.length === 0) return false;
+		// Traffic type filter — only show selected types. Empty = show all (defensive fallback).
+		if ($filters.trafficTypes.length === 0) return true;
 		return $filters.trafficTypes.includes(link.trafficType);
 	});
 });
