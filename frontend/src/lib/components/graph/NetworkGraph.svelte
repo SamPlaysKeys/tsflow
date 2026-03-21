@@ -18,6 +18,7 @@
 	import type { NetworkNode as NetworkNodeType, NetworkLink } from '$lib/types';
 	import NetworkNode from './NetworkNode.svelte';
 
+
 	interface Props {
 		nodes: NetworkNodeType[];
 		edges: NetworkLink[];
@@ -29,20 +30,23 @@
 		network: NetworkNode as unknown as typeof NetworkNode
 	};
 
+
 	// Get edge style based on traffic type and selection state
 	function getEdgeStyle(edge: NetworkLink, dimmed: boolean = false): string {
 		let strokeColor = 'var(--color-muted-foreground)';
 
-		switch (edge.trafficType) {
-			case 'virtual':
-				strokeColor = 'var(--color-traffic-virtual)';
-				break;
-			case 'subnet':
-				strokeColor = 'var(--color-traffic-subnet)';
-				break;
-			case 'physical':
-				strokeColor = 'var(--color-traffic-physical)';
-				break;
+		{
+			switch (edge.trafficType) {
+				case 'virtual':
+					strokeColor = 'var(--color-traffic-virtual)';
+					break;
+				case 'subnet':
+					strokeColor = 'var(--color-traffic-subnet)';
+					break;
+				case 'physical':
+					strokeColor = 'var(--color-traffic-physical)';
+					break;
+			}
 		}
 
 		// Width based on traffic volume
@@ -295,6 +299,7 @@
 			);
 
 			flowNodesStore.set(layoutedNodes);
+
 			flowEdgesStore.set(layoutedEdges);
 		} catch (error) {
 			console.error('Layout failed:', error);

@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { RefreshCw, PanelLeft, ScrollText, Sun, Moon, Monitor, Network, Link, Activity, BarChart3 } from 'lucide-svelte';
+	import { RefreshCw, PanelLeft, ScrollText, Sun, Moon, Monitor, Network, Link, Activity, BarChart3, Shield } from 'lucide-svelte';
 	import { page } from '$app/stores';
 	import { uiStore, loadNetworkData, networkStats, filteredNodes, lastUpdated, isAutoRefreshing, themeStore, statsSummary, topTalkers } from '$lib/stores';
+	import { policyGraph } from '$lib/stores/policy-store';
 	import { formatBytes } from '$lib/utils';
 	import type { ThemeMode } from '$lib/stores';
 
@@ -109,7 +110,15 @@
 				class:bg-secondary={currentPath === '/'}
 			>
 				<Network class="h-4 w-4" />
-				<span class="hidden sm:inline">Graph</span>
+				<span class="hidden sm:inline">Traffic</span>
+			</a>
+			<a
+				href="/policy"
+				class="flex items-center gap-1.5 rounded-md px-2.5 py-2 text-sm hover:bg-secondary sm:px-3 sm:py-1.5"
+				class:bg-secondary={currentPath === '/policy'}
+			>
+				<Shield class="h-4 w-4" />
+				<span class="hidden sm:inline">Policy</span>
 			</a>
 			<a
 				href="/analytics"

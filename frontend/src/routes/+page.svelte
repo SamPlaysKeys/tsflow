@@ -6,6 +6,7 @@
 	import LogViewer from '$lib/components/logs/LogViewer.svelte';
 	import PortDetails from '$lib/components/logs/PortDetails.svelte';
 	import BandwidthChart from '$lib/components/charts/BandwidthChart.svelte';
+	import EdgePolicyInfo from '$lib/components/logs/EdgePolicyInfo.svelte';
 	import Header from '$lib/components/layout/Header.svelte';
 	import { loadNetworkData, retryLoadNetworkData, retryCount, retryingIn, startAutoRefresh, stopAutoRefresh, filteredNodes, filteredEdges } from '$lib/stores/network-store';
 	import { uiStore } from '$lib/stores/ui-store';
@@ -150,7 +151,10 @@
 			<!-- Graph -->
 			{:else}
 				<div class="flex-1" style="height: calc(100% - {$uiStore.showLogViewer ? logViewerHeight + 110 : 0}px)">
-					<NetworkGraph nodes={$filteredNodes} edges={$filteredEdges} />
+					<NetworkGraph
+						nodes={$filteredNodes}
+						edges={$filteredEdges}
+					/>
 				</div>
 			{/if}
 
@@ -158,6 +162,7 @@
 			{#if $uiStore.showLogViewer}
 				<BandwidthChart />
 				<PortDetails />
+				<EdgePolicyInfo />
 
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<!-- Resize Handle - taller touch target on mobile -->
