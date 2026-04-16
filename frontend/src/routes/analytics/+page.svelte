@@ -15,12 +15,23 @@
 		topPorts,
 		statsLoading,
 		statsError,
-		queryTimeWindow
+		queryTimeWindow,
+		timeRangeStore,
+		hasHistoricalData,
+		dataSourceStore
 	} from '$lib/stores';
 	import { formatBytes } from '$lib/utils';
 	import { getPortLabel } from '$lib/utils/protocol';
 
 	onMount(() => {
+		// Analytics is most useful over at least 1h; nudge the default up from 5m
+		const SHORT_RANGES = new Set(['1m', '5m', '15m', '30m']);
+		if (SHORT_RANGES.has($timeRangeStore.selected)) {
+			timeRangeStore.setPreset('1h');
+		}
+		if (!$dataSourceStore.dataRange) {
+			dataSourceStore.fetchDataRange();
+		}
 		startStatsRefresh(60_000);
 	});
 
@@ -147,6 +158,15 @@
 				{$statsError}
 			</div>
 		{:else}
+			{#if $statsSummary && $statsSummary.totalFlows === 0 && $hasHistoricalData && $dataSourceStore.mode !== 'historical'}
+				<div class="mb-4 rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground sm:mb-6">
+					No traffic data in the selected window.
+					Switch to <button
+						class="underline hover:text-foreground"
+						onclick={() => dataSourceStore.setMode('historical')}
+					>Historical mode</button> to browse stored data.
+				</div>
+			{/if}
 			<!-- Overview Cards -->
 			<div class="mb-4 grid grid-cols-2 gap-2 sm:mb-6 sm:gap-4 lg:grid-cols-4">
 				<StatCard label="Total Traffic" value={formatBytes(totalBytes)} subtitle={timeWindowLabel} sparkline={trafficSparkline}>
@@ -215,6 +235,7 @@
 								<tr class="border-b border-border text-left text-muted-foreground">
 									<th class="pb-2 pr-4">#</th>
 									<th class="pb-2 pr-4">Device</th>
+									<th class="pb-2 pr-4 text-muted-foreground">Owner</th>
 									<th
 										class="cursor-pointer select-none pb-2 pr-4 text-right transition-colors hover:text-foreground"
 										onclick={() => toggleTalkerSort('txBytes')}
@@ -254,6 +275,9 @@
 												</span>
 											{/if}
 										</td>
+										<td class="max-w-[160px] truncate py-1.5 pr-4 text-xs text-muted-foreground" title={talker.owner ?? ''}>
+											{talker.owner ?? '—'}
+										</td>
 										<td class="py-1.5 pr-4 text-right tabular-nums"
 											>{formatBytes(talker.txBytes)}</td
 										>
@@ -290,6 +314,9 @@
 									<span class="tabular-nums">TX {formatBytes(talker.txBytes)}</span>
 									<span class="tabular-nums">RX {formatBytes(talker.rxBytes)}</span>
 								</div>
+								{#if talker.owner}
+									<div class="mt-0.5 truncate pl-5 text-xs text-muted-foreground/70">{talker.owner}</div>
+								{/if}
 							</div>
 						{/each}
 					</div>
@@ -337,28 +364,32 @@
 								{#each sortedPairs as pair, i}
 									<tr class="border-b border-border/50 transition-colors hover:bg-secondary/50">
 										<td class="py-1.5 pr-4 text-muted-foreground">{i + 1}</td>
-										<td
-											class="max-w-[140px] truncate py-1.5 pr-4"
-											title={pair.srcNodeId}
-										>
-											{#if pair.srcDisplayName}
-												<span class="font-medium">{pair.srcDisplayName}</span>
-											{:else}
-												<span class="font-mono text-xs text-muted-foreground">
-													{nodeLabel(pair.srcNodeId)}
-												</span>
+										<td class="max-w-[140px] py-1.5 pr-4" title={pair.srcNodeId}>
+											<div class="truncate">
+												{#if pair.srcDisplayName}
+													<span class="font-medium">{pair.srcDisplayName}</span>
+												{:else}
+													<span class="font-mono text-xs text-muted-foreground">
+														{nodeLabel(pair.srcNodeId)}
+													</span>
+												{/if}
+											</div>
+											{#if pair.srcOwner}
+												<div class="truncate text-xs text-muted-foreground/70">{pair.srcOwner}</div>
 											{/if}
 										</td>
-										<td
-											class="max-w-[140px] truncate py-1.5 pr-4"
-											title={pair.dstNodeId}
-										>
-											{#if pair.dstDisplayName}
-												<span class="font-medium">{pair.dstDisplayName}</span>
-											{:else}
-												<span class="font-mono text-xs text-muted-foreground">
-													{nodeLabel(pair.dstNodeId)}
-												</span>
+										<td class="max-w-[140px] py-1.5 pr-4" title={pair.dstNodeId}>
+											<div class="truncate">
+												{#if pair.dstDisplayName}
+													<span class="font-medium">{pair.dstDisplayName}</span>
+												{:else}
+													<span class="font-mono text-xs text-muted-foreground">
+														{nodeLabel(pair.dstNodeId)}
+													</span>
+												{/if}
+											</div>
+											{#if pair.dstOwner}
+												<div class="truncate text-xs text-muted-foreground/70">{pair.dstOwner}</div>
 											{/if}
 										</td>
 										<td class="py-1.5 pr-4 text-right font-medium tabular-nums"
@@ -398,6 +429,13 @@
 										{/if}
 									</span>
 								</div>
+								{#if pair.srcOwner || pair.dstOwner}
+									<div class="mt-0.5 flex items-center gap-1 text-[10px] text-muted-foreground/70">
+										<span class="truncate">{pair.srcOwner ?? '—'}</span>
+										<span class="shrink-0">&rarr;</span>
+										<span class="truncate">{pair.dstOwner ?? '—'}</span>
+									</div>
+								{/if}
 								<div class="mt-0.5 text-[10px] text-muted-foreground">
 									{pair.flowCount.toLocaleString()} flows
 								</div>
