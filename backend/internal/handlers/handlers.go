@@ -45,13 +45,13 @@ type Handlers struct {
 	version          string
 }
 
-func NewHandlers(tailscaleService *services.TailscaleService, store database.Store, poller *services.Poller) *Handlers {
+func NewHandlers(tailscaleService *services.TailscaleService, store database.Store, poller *services.Poller, version string) *Handlers {
 	return &Handlers{
 		tailscaleService: tailscaleService,
 		store:            store,
 		poller:           poller,
 		startTime:        time.Now(),
-		version:          "0.0.1",
+		version:          version,
 	}
 }
 

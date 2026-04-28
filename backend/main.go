@@ -43,6 +43,11 @@ func customLoggingMiddleware() gin.HandlerFunc {
 	})
 }
 
+var (
+	// Version is set at build time via ldflags by GoReleaser
+	Version = "dev"
+)
+
 func main() {
 	// Configure logging to stdout for container visibility
 	log.SetOutput(os.Stdout)
@@ -111,7 +116,7 @@ func main() {
 	}
 
 	// Create handlers with store and poller
-	handlerService := handlers.NewHandlers(tailscaleService, store, poller)
+	handlerService := handlers.NewHandlers(tailscaleService, store, poller, Version)
 
 	// Configure Gin logging
 	var router *gin.Engine

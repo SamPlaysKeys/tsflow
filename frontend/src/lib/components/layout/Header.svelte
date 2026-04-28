@@ -157,7 +157,7 @@
 						<Activity class="h-5 w-5 text-primary" />
 						<h2 class="font-semibold text-foreground">TSFlow</h2>
 						<span class="rounded bg-secondary px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
-							>v{tsflowVersion}</span
+							>{tsflowVersion.startsWith('v') ? tsflowVersion : `v${tsflowVersion}`}</span
 						>
 					</div>
 
