@@ -17,8 +17,8 @@
 	// About flyout state
 	let showAbout = $state(false);
 	let tsflowVersion = $state('...');
-	let uptimeSeconds = $state(0);
-	const uptimeFormatted = $derived(formatDuration(uptimeSeconds));
+	let uptimeSeconds = $state<number | null>(null);
+	const uptimeFormatted = $derived(uptimeSeconds !== null ? formatDuration(uptimeSeconds) : '...');
 
 	async function fetchHealth() {
 		try {
@@ -38,7 +38,7 @@
 		if (showAbout) {
 			fetchHealth();
 			interval = setInterval(() => {
-				uptimeSeconds++;
+				if (uptimeSeconds !== null) uptimeSeconds++;
 			}, 1000);
 		}
 		return () => {
@@ -127,7 +127,7 @@
 
 <svelte:window onclick={handleCloseAbout} />
 
-<header class="flex h-12 items-center justify-between border-b border-border bg-card px-2 sm:h-14 sm:px-4">
+<header class="relative z-30 flex h-12 items-center justify-between border-b border-border bg-card px-2 sm:h-14 sm:px-4">
 	<!-- Left section: Filter toggle + Logo + Nav -->
 	<div class="flex items-center gap-2 sm:gap-4">
 		<button
