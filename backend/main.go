@@ -158,6 +158,7 @@ func main() {
 	api := router.Group("/api")
 	api.Use(middleware.RateLimitMiddleware(middleware.DefaultRateLimitConfig()))
 	{
+		api.GET("/health", handlerService.HealthCheck)
 		// Existing endpoints (live API queries) - short cache
 		liveCache := middleware.CacheMiddleware(middleware.ShortCacheConfig())
 		api.GET("/devices", liveCache, handlerService.GetDevices)

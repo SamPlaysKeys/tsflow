@@ -41,6 +41,8 @@ type Handlers struct {
 	tailscaleService *services.TailscaleService
 	store            database.Store
 	poller           *services.Poller
+	startTime        time.Time
+	version          string
 }
 
 func NewHandlers(tailscaleService *services.TailscaleService, store database.Store, poller *services.Poller) *Handlers {
@@ -48,6 +50,8 @@ func NewHandlers(tailscaleService *services.TailscaleService, store database.Sto
 		tailscaleService: tailscaleService,
 		store:            store,
 		poller:           poller,
+		startTime:        time.Now(),
+		version:          "0.0.1",
 	}
 }
 
@@ -55,6 +59,9 @@ func (h *Handlers) HealthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "healthy",
 		"timestamp": time.Now().UTC(),
+		"startTime": h.startTime.UTC(),
+		"uptime":    time.Since(h.startTime).Seconds(),
+		"version":   h.version,
 		"service":   "tsflow-backend",
 	})
 }
